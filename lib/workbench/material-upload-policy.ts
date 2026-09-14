@@ -12,8 +12,14 @@ export const MEDIA_MIME_TYPES = [
 
 export const MEDIA_MIME_ALIASES = ['audio/x-m4a'] as const;
 
-const MIME_ALIASES: Readonly<Record<string, (typeof MEDIA_MIME_TYPES)[number]>> = {
+const MIME_ALIASES: Readonly<Record<string, string>> = {
   'audio/x-m4a': 'audio/mp4',
+  'application/wps-office.docx':
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/wps-office.pptx':
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/wps-office.xlsx':
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 };
 
 export function normalizeWorkbenchMaterialMime(mime: string): string {

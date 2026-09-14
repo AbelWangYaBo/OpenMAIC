@@ -47,6 +47,30 @@ describe('document MIME normalization', () => {
     expect(normalizeDocumentMimeType({ mimeType: 'text/x-markdown', fileName: 'notes.md' })).toBe(
       DOCUMENT_MIME_TYPES.markdown,
     );
+    expect(
+      normalizeDocumentMimeType({
+        mimeType: 'application/wps-office.pptx',
+        fileName: 'slides.pptx',
+      }),
+    ).toBe(DOCUMENT_MIME_TYPES.pptx);
+    expect(
+      normalizeDocumentMimeType({
+        mimeType: 'application/wps-office.docx',
+        fileName: 'lesson.docx',
+      }),
+    ).toBe(DOCUMENT_MIME_TYPES.docx);
+    expect(
+      normalizeDocumentMimeType({
+        mimeType: 'application/wps-office.xlsx',
+        fileName: 'grades.xlsx',
+      }),
+    ).toBe(DOCUMENT_MIME_TYPES.xlsx);
+    expect(
+      isMimeSupportedByProviders(
+        { mimeType: 'application/wps-office.pptx', fileName: 'slides.pptx' },
+        ['mineru'],
+      ),
+    ).toBe(true);
   });
 
   it('falls back to the extension when a browser reports an unknown MIME', () => {
@@ -73,6 +97,12 @@ describe('document MIME normalization', () => {
       isMimeSupportedByProviders({ mimeType: 'application/x-msdownload', fileName: 'lesson.pdf' }, [
         'unpdf',
       ]),
+    ).toBe(false);
+    expect(
+      isMimeSupportedByProviders(
+        { mimeType: 'application/wps-office.unknown', fileName: 'lesson.pptx' },
+        ['mineru'],
+      ),
     ).toBe(false);
   });
 

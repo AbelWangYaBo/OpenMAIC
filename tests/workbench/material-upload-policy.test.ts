@@ -19,6 +19,33 @@ describe('resolveWorkbenchMaterialMime', () => {
     );
   });
 
+  it('maps Kylin WPS Office MIME types to their canonical OOXML formats', () => {
+    expect(
+      resolveWorkbenchMaterialMime({
+        mimeType: 'application/wps-office.pptx',
+        fileName: 'slides.pptx',
+      }),
+    ).toBe(PPTX_MIME);
+    expect(
+      resolveWorkbenchMaterialMime({
+        mimeType: 'application/wps-office.docx',
+        fileName: 'lesson.docx',
+      }),
+    ).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    expect(
+      resolveWorkbenchMaterialMime({
+        mimeType: 'application/wps-office.xlsx',
+        fileName: 'grades.xlsx',
+      }),
+    ).toBe(XLSX_MIME);
+    expect(
+      resolveWorkbenchMaterialMime({
+        mimeType: 'application/wps-office.unknown',
+        fileName: 'slides.pptx',
+      }),
+    ).toBe('application/wps-office.unknown');
+  });
+
   it('resolves a missing or generic MIME from the filename extension', () => {
     // Older Linux XDG mime databases report every OOXML file as the generic
     // Office container (#1497); empty, octet-stream, and zip-family types
