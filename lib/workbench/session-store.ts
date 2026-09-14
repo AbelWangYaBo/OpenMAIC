@@ -2170,11 +2170,14 @@ export async function uploadWorkbenchMaterial(file: File): Promise<WorkbenchMate
       requestId,
     );
   }
+  // Prefer the server's echo; fall back to the locally resolved MIME (never
+  // the raw browser value, which may be the generic Office container).
+  const recordMime = body.mime || mimeType || file.type;
   return {
     materialId: body.materialId,
     name: body.originalName ?? file.name,
     bytes: body.bytes ?? file.size,
-    ...(body.mime || file.type ? { mimeType: body.mime || file.type } : {}),
+    ...(recordMime ? { mimeType: recordMime } : {}),
     ...(body.extraction?.status ? { extractionStatus: body.extraction.status } : {}),
   };
 }

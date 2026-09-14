@@ -111,6 +111,14 @@ describe('document MIME normalization', () => {
       ).toBe(DOCUMENT_MIME_TYPES.ppt);
     });
 
+    it('keeps the provider capability split for resolved legacy .ppt', () => {
+      // Self-host MinerU does not support legacy OLE formats; only the cloud
+      // provider does. Resolution must not blur that line.
+      const input = { mimeType: 'application/vnd.ms-office', fileName: 'deck.ppt' };
+      expect(isMimeSupportedByProviders(input, ['mineru'])).toBe(false);
+      expect(isMimeSupportedByProviders(input, ['mineru-cloud'])).toBe(true);
+    });
+
     it('passes provider whitelists for providers that support the format', () => {
       expect(
         isMimeSupportedByProviders(

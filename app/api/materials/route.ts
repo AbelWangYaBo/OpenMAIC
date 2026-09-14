@@ -158,6 +158,7 @@ export async function POST(req: NextRequest) {
   let phase = 'feature_gate';
   let materialId: string | undefined;
   let mime = '';
+  let declaredMime = '';
   let declaredBytes = 0;
   let receivedBytes = 0;
   let failureLogged = false;
@@ -166,6 +167,7 @@ export async function POST(req: NextRequest) {
     phase,
     ...(materialId ? { materialId } : {}),
     ...(mime ? { mime } : {}),
+    ...(declaredMime && declaredMime !== mime ? { declaredMime } : {}),
     declaredBytes,
     receivedBytes,
     durationMs: Date.now() - startedAt,
@@ -184,6 +186,7 @@ export async function POST(req: NextRequest) {
     try {
       phase = 'validate_request';
       const rawMime = (req.headers.get('content-type') ?? '').split(';', 1)[0];
+      declaredMime = rawMime;
       const originalName = materialFilename(req);
       // A generic content-type (empty, octet-stream, zip-family, or the
       // generic Office container some Linux browsers report for OOXML —

@@ -291,6 +291,17 @@ describe('POST /api/materials', () => {
     expect(mocks.registerOwnerMaterial).not.toHaveBeenCalled();
   });
 
+  it('answers 415 for a generic MIME before the missing-filename 400', async () => {
+    // A generic type with no filename cannot be resolved, so the mime gate
+    // fires first — error precedence must match the specific-MIME path.
+    const response = await post(Buffer.from('x'), {
+      'content-type': 'application/vnd.ms-office',
+      'x-material-filename': '',
+    });
+    expect(response.status).toBe(415);
+    expect(mocks.registerOwnerMaterial).not.toHaveBeenCalled();
+  });
+
   it('rejects a missing filename header', async () => {
     const response = await post(Buffer.from('x'), { 'x-material-filename': '' });
     expect(response.status).toBe(400);

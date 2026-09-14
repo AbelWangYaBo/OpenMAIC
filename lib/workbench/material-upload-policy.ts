@@ -96,7 +96,7 @@ export const WORKBENCH_MATERIAL_MIME_TYPES = [
   ...MEDIA_MIME_TYPES,
 ] as const;
 
-const WORKBENCH_MATERIAL_EXTENSIONS = [
+export const WORKBENCH_MATERIAL_EXTENSIONS = [
   '.pdf',
   '.pptx',
   '.docx',

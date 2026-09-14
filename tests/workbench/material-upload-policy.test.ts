@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   isWorkbenchMaterialMime,
   resolveWorkbenchMaterialMime,
+  WORKBENCH_MATERIAL_EXTENSIONS,
 } from '@/lib/workbench/material-upload-policy';
 
 const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
@@ -55,5 +56,29 @@ describe('resolveWorkbenchMaterialMime', () => {
     });
     expect(resolved).toBe('application/vnd.ms-office');
     expect(isWorkbenchMaterialMime(resolved)).toBe(false);
+  });
+
+  it('resolves uppercase extensions', () => {
+    expect(
+      resolveWorkbenchMaterialMime({
+        mimeType: 'application/vnd.ms-office',
+        fileName: 'slides.PPTX',
+      }),
+    ).toBe(PPTX_MIME);
+  });
+
+  it('resolves every accepted extension to a whitelisted MIME (drift guard)', () => {
+    // MIME_BY_EXTENSION is hand-maintained next to the extension list; if a
+    // new extension joins the whitelist without a map entry (or with a value
+    // outside the whitelist), generic-MIME uploads for it would silently 415
+    // — the exact regression class this module exists to prevent.
+    for (const extension of WORKBENCH_MATERIAL_EXTENSIONS) {
+      const resolved = resolveWorkbenchMaterialMime({
+        mimeType: 'application/octet-stream',
+        fileName: `file${extension}`,
+      });
+      expect(resolved, extension).toBeTruthy();
+      expect(isWorkbenchMaterialMime(resolved), extension).toBe(true);
+    }
   });
 });
