@@ -249,6 +249,12 @@ const GENERIC_DOCUMENT_MIME_TYPES = new Set([
   'application/zip',
   'application/x-zip',
   'application/x-zip-compressed',
+  // Linux browsers resolve File.type against the XDG shared-mime-info
+  // database, and older databases (e.g. Kylin OS V10) map every OOXML
+  // extension to this generic container type instead of the concrete
+  // format MIME. Like the zip family, it carries no format specificity —
+  // the extension decides. (#1497)
+  'application/vnd.ms-office',
 ]);
 
 /**
@@ -256,9 +262,9 @@ const GENERIC_DOCUMENT_MIME_TYPES = new Set([
  *
  * Precedence:
  *   1. mimeType is missing or a generic upload fallback (octet-stream,
- *      zip-family): use the extension. Handles the common case where a
- *      browser has no more specific MIME to offer for Office/ZIP-based
- *      formats.
+ *      zip-family, or the generic Office container `vnd.ms-office`):
+ *      use the extension. Handles the common case where a browser has no
+ *      more specific MIME to offer for Office/ZIP-based formats.
  *   2. mimeType is a known alias (canonical MIME, or one of the
  *      registry's curated `aliasMimes` — e.g. `image/jpeg2000`,
  *      `text/x-markdown`, `application/x-msword`): map to the canonical

@@ -27,6 +27,7 @@ import { defaultWorkbenchTranslator, type WorkbenchCopyKey } from '@/lib/i18n/wo
 import { parseElementRefs, type ElementRef } from './element-refs';
 import { parseCourseRefs, type CourseRef } from './course-refs';
 import { appendCourseSighting, courseSightingsOf } from './run-courses';
+import { resolveWorkbenchMaterialMime } from './material-upload-policy';
 
 export type ChatNodeKind =
   | 'user'
@@ -2134,10 +2135,17 @@ export class WorkbenchMaterialUploadError extends Error {
 
 /** Upload one file into the caller's durable material library. */
 export async function uploadWorkbenchMaterial(file: File): Promise<WorkbenchMaterial> {
+  // Some Linux browsers report every OOXML file with the generic
+  // `application/vnd.ms-office` MIME (#1497) — resolve the concrete type
+  // from the filename so the server gate sees what the file actually is.
+  const mimeType = resolveWorkbenchMaterialMime({
+    mimeType: file.type,
+    fileName: file.name,
+  });
   const res = await fetch('/api/materials', {
     method: 'POST',
     headers: {
-      'content-type': file.type || 'application/octet-stream',
+      'content-type': mimeType || 'application/octet-stream',
       'x-material-filename': encodeURIComponent(file.name),
     },
     body: file,

@@ -76,6 +76,66 @@ describe('document MIME normalization', () => {
     ).toBe(false);
   });
 
+  describe('generic Office container MIME (application/vnd.ms-office)', () => {
+    // Older Linux XDG shared-mime-info databases (e.g. Kylin OS V10) report
+    // every OOXML file as the generic Office container instead of the
+    // concrete format MIME. Like the zip family, the extension must decide.
+    // (#1497)
+    it('resolves OOXML extensions through the extension fallback', () => {
+      expect(
+        normalizeDocumentMimeType({
+          mimeType: 'application/vnd.ms-office',
+          fileName: 'slides.pptx',
+        }),
+      ).toBe(DOCUMENT_MIME_TYPES.pptx);
+      expect(
+        normalizeDocumentMimeType({
+          mimeType: 'application/vnd.ms-office',
+          fileName: 'lesson.docx',
+        }),
+      ).toBe(DOCUMENT_MIME_TYPES.docx);
+      expect(
+        normalizeDocumentMimeType({
+          mimeType: 'application/vnd.ms-office',
+          fileName: 'grades.xlsx',
+        }),
+      ).toBe(DOCUMENT_MIME_TYPES.xlsx);
+    });
+
+    it('resolves legacy Office extensions to their own canonical MIME', () => {
+      expect(
+        normalizeDocumentMimeType({
+          mimeType: 'application/vnd.ms-office',
+          fileName: 'deck.ppt',
+        }),
+      ).toBe(DOCUMENT_MIME_TYPES.ppt);
+    });
+
+    it('passes provider whitelists for providers that support the format', () => {
+      expect(
+        isMimeSupportedByProviders(
+          { mimeType: 'application/vnd.ms-office', fileName: 'slides.pptx' },
+          ['mineru'],
+        ),
+      ).toBe(true);
+    });
+
+    it('still rejects the generic MIME when the extension is unknown', () => {
+      expect(
+        normalizeDocumentMimeType({
+          mimeType: 'application/vnd.ms-office',
+          fileName: 'blob.bin',
+        }),
+      ).toBe('application/vnd.ms-office');
+      expect(
+        isMimeSupportedByProviders(
+          { mimeType: 'application/vnd.ms-office', fileName: 'blob.bin' },
+          ['mineru-cloud'],
+        ),
+      ).toBe(false);
+    });
+  });
+
   it('accepts a non-canonical browser MIME for a provider that supports the format', () => {
     // Regression: previously the raw non-canonical MIME leaked through and
     // failed the provider whitelist despite the file being valid.
