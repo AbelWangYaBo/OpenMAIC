@@ -260,7 +260,7 @@ jobs:
           git -C .producer-source apply "$GITHUB_WORKSPACE/render-service/producer-patch/producer.patch"
           ln -s "$GITHUB_WORKSPACE/render-service/node_modules" .producer-source/node_modules
           cd .producer-source
-          ../render-service/node_modules/.bin/vitest run \
+          ../render-service/node_modules/.bin/vitest run --config ../render-service/producer-patch/vitest.config.mjs \
             packages/producer/src/resources/admission.test.ts \
             packages/producer/src/resources/linux.test.ts \
             packages/producer/src/resources/supervisor.test.ts \
