@@ -1296,6 +1296,9 @@ export function renderTextBody(
       // content; emitting an inline <span> before a block-level wrapper <div>
       // would push the content onto the next line and shift the whole paragraph.
       let bulletHtml = '';
+      let bulletSlotWidthPx = 0;
+      let tabBulletText = '';
+      let tabBulletStyle = '';
       if (bulletPrefix) {
         // Compute the first-run effective style once so the bullet can inherit
         // color, font-size, AND font-family from it. Without this, auto-number
@@ -1374,6 +1377,7 @@ export function renderTextBody(
           // 时，过宽的槽把正文推到 marL+|indent| 之外、bullet 离正文很远。slide 3 那种「无显式 marL、
           // 由 -indent 合成 marL」的情形 marL==|indent|，取值不变、不受影响。
           const slotWidthPx = -(merged.textIndent ?? 0);
+          bulletSlotWidthPx = slotWidthPx;
           // symbol bullet 的字形对齐：
           // - 合成 marL（无真实 marL、bullet 紧贴 element 左沿、可能压住相邻形状，如 slide 3 编号圆）：
           //   在槽内补 padding-left:16px 把 ■ 往右推、避开相邻形状光晕；body 位置不变。
@@ -1393,6 +1397,8 @@ export function renderTextBody(
           // 字形稳定落在 padding 处，body 与续行仍由 <p> 的 margin-left/text-indent 控制不受影响。
           bulletHtml = `<span style="display:inline-block;width:${slotWidthPx}px;text-indent:0;${slotPad}${bFontCss}${bSizeCss}color: ${bColor};">${escapeHtml(displayChar)}</span>`;
         } else {
+          tabBulletText = `${displayChar} `;
+          tabBulletStyle = `${bFontCss}${bSizeCss}`;
           bulletHtml = `<span style="${bFontCss}${bSizeCss}color: ${bColor};">${escapeHtml(displayChar)} </span>`;
         }
       }
@@ -1456,7 +1462,10 @@ export function renderTextBody(
       let prevStyleStr: string | null = null;
       let prevIsLink = false;
       let accumulatedText = '';
-      let tabCursorPx = (finalMarginLeftPx ?? 0) + (merged.textIndent ?? 0);
+      let tabCursorPx =
+        (tabStopBehindMargin
+          ? leadingFirstStop!
+          : (finalMarginLeftPx ?? 0) + (merged.textIndent ?? 0)) + bulletSlotWidthPx;
       // Use actual browser font metrics to decide which stop follows the text.
       // The output contains fixed column widths, so consumers need no tab support.
       const tabMeasure =
@@ -1489,6 +1498,10 @@ export function renderTextBody(
         }
         return width + Array.from(text).length * spacingPx;
       };
+
+      if (useCustomTabColumns && tabBulletText) {
+        tabCursorPx += measureTabText(tabBulletText, tabBulletStyle);
+      }
 
       const flushAccumulatedRun = () => {
         if (!accumulatedText || prevStyleStr === null) return;
@@ -1648,7 +1661,10 @@ export function renderTextBody(
                   merged.tabStopsPx!.find((pos) => pos > textEndPx + 0.01) ??
                   (Math.floor((textEndPx + 0.01) / grid) + 1) * grid;
                 const widthPt = ((stop - tabCursorPx) * 3) / 4;
-                html += `<span style="display:inline-block;width:${widthPt.toFixed(2)}pt;text-indent:0;white-space:pre;">${text ? paint(text) : ''}</span>`;
+                // Server estimates can undercount wide glyphs. Let their columns
+                // grow to the painted text width so following content cannot overlap.
+                const minWidth = tabMeasure ? '' : 'min-width:max-content;';
+                html += `<span style="display:inline-block;width:${widthPt.toFixed(2)}pt;${minWidth}text-indent:0;text-align:left;white-space:pre;">${text ? paint(text) : ''}</span>`;
                 tabCursorPx = stop;
               } else if (text) {
                 html += paint(text);

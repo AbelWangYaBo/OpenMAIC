@@ -136,6 +136,8 @@ const letterSpacing: MarkSpec = {
 const inlineBlock: MarkSpec = {
   attrs: {
     width: {},
+    minWidth: { default: '' },
+    textAlign: { default: '' },
     height: { default: '' },
     verticalAlign: { default: '' },
     margin: { default: '' },
@@ -159,6 +161,7 @@ const inlineBlock: MarkSpec = {
         const {
           display,
           width,
+          minWidth,
           height,
           verticalAlign,
           margin,
@@ -182,6 +185,8 @@ const inlineBlock: MarkSpec = {
           return false;
         return {
           width,
+          minWidth: minWidth === 'max-content' ? minWidth : '',
+          textAlign: element.style.textAlign === 'left' ? 'left' : '',
           height,
           verticalAlign,
           margin,
@@ -202,6 +207,8 @@ const inlineBlock: MarkSpec = {
   ],
   toDOM: (mark) => {
     let style = `display: inline-block; width: ${mark.attrs.width};`;
+    if (mark.attrs.minWidth === 'max-content') style += 'min-width: max-content;';
+    if (mark.attrs.textAlign === 'left') style += 'text-align: left;';
     if (mark.attrs.height) style += `height: ${mark.attrs.height};`;
     if (mark.attrs.verticalAlign) style += `vertical-align: ${mark.attrs.verticalAlign};`;
     if (mark.attrs.margin) style += `margin: ${mark.attrs.margin};`;

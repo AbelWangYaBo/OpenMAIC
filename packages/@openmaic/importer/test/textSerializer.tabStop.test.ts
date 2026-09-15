@@ -100,3 +100,18 @@ it('keeps native tab layout for inline math whose rendered width is not a text m
   expect(html).toContain('tab-size:');
   expect(html).not.toContain('display:inline-block;width:');
 });
+
+it('starts tab measurement after the hanging bullet slot', () => {
+  const html = renderTxBodyHtml(
+    '<a:p><a:pPr marL="381000" indent="-190500"><a:buChar char="•"/><a:tabLst><a:tab pos="952500"/></a:tabLst></a:pPr><a:r><a:rPr sz="1200"/><a:t>A\tB</a:t></a:r></a:p>',
+  );
+  // Text starts at 40px after the 20px bullet slot. The remaining column is 60px.
+  expect(html).toContain('width:45.00pt;');
+});
+
+it.each(['ctr', 'r'])('keeps text at the start of a tab column in %s paragraphs', (align) => {
+  const html = renderTxBodyHtml(
+    `<a:p><a:pPr algn="${align}"><a:tabLst><a:tab pos="952500"/></a:tabLst></a:pPr><a:r><a:rPr sz="1200"/><a:t>A\tB</a:t></a:r></a:p>`,
+  );
+  expect(html).toMatch(/display:inline-block;[^\"]*text-align:left;/);
+});
