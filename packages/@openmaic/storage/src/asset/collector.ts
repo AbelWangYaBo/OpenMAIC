@@ -631,13 +631,23 @@ export class AssetCollector {
    * The document store stamps an entry the moment a write drops its last
    * reference, which covers everything that happens through a write. What it
    * cannot cover is a reference row that went missing WITHOUT such a write:
-   * a `deleteDocument` issued by a store with `trackAssetReferences` off,
-   * rows removed out of band, a restore that reinstated documents but not the
-   * reference table. Such an entry is committed, unstamped and referenced by
-   * nothing, and nothing else in the system would ever look at it again --
+   * rows removed out of band, or a restore that reinstated documents but not
+   * the reference table. Such an entry is committed, unstamped and referenced
+   * by nothing, and nothing else in the system would ever look at it again --
    * `releaseEntries` takes only entries with `expires_at` or `unreferenced_at`
    * set, and the blob pass refuses a blob any entry still names. The entry,
    * its bytes and its share of the principal's quota would be held forever.
+   *
+   * NOT a repair for a mixed tracking state, which is the opposite shape and
+   * is worth naming so this is not read as covering it. A `deleteDocument`
+   * issued by a store with `trackAssetReferences` off deletes the document
+   * rows and nothing else -- `document_asset_refs` has no foreign key to
+   * `document_stages` -- so that document's reference rows OUTLIVE it. The
+   * entry stays referenced, by rows naming a stage that is gone, which is the
+   * state this sweep skips by design and nothing in this package reclaims.
+   * `docs/reference-server.md` says why the answer is to roll
+   * `trackAssetReferences` and `documentReferences` back together rather than
+   * to have the collector guess.
    *
    * Gated on the legacy gate being open, which is invariant (i) again rather
    * than caution: while the walk is unfinished the reference table is a subset
