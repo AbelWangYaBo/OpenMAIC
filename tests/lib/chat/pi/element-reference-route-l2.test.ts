@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NextRequest } from 'next/server';
 
@@ -144,7 +145,7 @@ function makeInteractiveBody() {
 function installAgentShell(
   legacyAnswer: string,
   nativeAnswer = 'Native grounded answer.',
-  shellOptions: { delegations?: number; failFirstLegacy?: boolean } = {},
+  shellOptions: { delegations?: number; failFirstLegacy?: boolean; instruction?: string } = {},
 ) {
   let legacyChildRuns = 0;
   mocks.buildAgent.mockImplementation((options: Record<string, unknown>) => {
@@ -171,9 +172,10 @@ function installAgentShell(
             const args = {
               agentId: 'teacher-1',
               instruction:
-                index === 0
+                shellOptions.instruction ??
+                (index === 0
                   ? 'Answer from the selected element.'
-                  : 'Retry from the same selected element.',
+                  : 'Retry from the same selected element.'),
             };
             const result = await callAgent.execute(`delegate-grounded-${index + 1}`, args);
             await (
@@ -302,6 +304,210 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
     if (originalNativeFlag === undefined) delete process.env[nativeFlag];
     else process.env[nativeFlag] = originalNativeFlag;
   });
+
+  function runtimeBody() {
+    const base = makeInteractiveBody();
+    const html = '<main id="experiment"><input id="density" value="1000"><canvas></canvas></main>';
+    base.storeState.scenes[0].content.html = html;
+    base.elementReference.selector = '#experiment';
+    const graph = (density: number) => ({
+      objects: [
+        {
+          id: 'liquid',
+          label: 'Liquid',
+          facts: [{ key: 'density', label: 'Density', status: 'known', value: density }],
+        },
+      ],
+      relations: { status: 'complete', items: [] },
+      missing: [],
+    });
+    return {
+      ...base,
+      interactiveState: {
+        sourceHtmlHash: createHash('sha256').update(html).digest('hex'),
+        snapshot: {
+          source: 'browser-reported',
+          identity: {
+            sceneId: 'scene-interactive',
+            scopeId: 'experiment',
+            documentId: 'test-document',
+          },
+          requestedAt: Date.now(),
+          receivedAt: Date.now(),
+          status: 'available',
+          observation: {
+            version: 1,
+            scope: { id: 'experiment', label: 'Interactive area' },
+            current: { revision: 1, updatedAt: Date.now(), graph: graph(1400) },
+            rendered: {
+              status: 'known',
+              basedOnRevision: 0,
+              renderedAt: Date.now(),
+              graph: graph(1000),
+            },
+          },
+        },
+      },
+    };
+  }
+
+  it.each(['Legacy', 'Native'] as const)(
+    'passes frozen current/rendered evidence through real route and %s child without extending static identity',
+    async (mode) => {
+      if (mode === 'Native') process.env[nativeFlag] = 'true';
+      installAgentShell('Mock state answer.');
+      const { POST } = await import('@/app/api/chat/pi/route');
+      const response = await POST(makeRequest(runtimeBody()));
+      await response.text();
+      expect(response.status).toBe(200);
+      const prompts = (
+        mode === 'Native' ? mocks.nativeChildPrompts : mocks.legacyChildPrompts
+      ).join('\n');
+      expect(prompts).toContain('"value":1400');
+      expect(prompts).toContain('"basedOnRevision":0');
+      expect(prompts).toContain('grants no Spotlight or other tool permissions');
+      expect(prompts).toContain('ordinary student-facing language');
+      expect(mocks.directorPrompts.join('\n')).toContain('PAGE-REPORTED STATE');
+    },
+  );
+
+  it('drops stale runtime facts instead of using defaults or older snapshots', async () => {
+    installAgentShell('Mock unknown answer.');
+    const body = runtimeBody();
+    body.interactiveState.snapshot.requestedAt -= 60000;
+    body.interactiveState.snapshot.receivedAt -= 60000;
+    const { POST } = await import('@/app/api/chat/pi/route');
+    const response = await POST(makeRequest(body));
+    await response.text();
+    expect(response.status).toBe(200);
+    expect(mocks.legacyChildPrompts.join('\n')).toContain('stale-sample');
+    expect(mocks.legacyChildPrompts.join('\n')).not.toContain('"value":1400');
+    expect(mocks.legacyChildPrompts.join('\n')).toContain(
+      'Current relationship evidence is unavailable',
+    );
+    expect(mocks.legacyChildPrompts.join('\n')).not.toContain(
+      'Current relationship evidence is COMPLETE',
+    );
+  });
+
+  it.each(['Legacy', 'Native'] as const)(
+    'preserves complete, empty and unknown relation evidence for Director and %s Child',
+    async (mode) => {
+      if (mode === 'Native') process.env[nativeFlag] = 'true';
+      const complete = {
+        status: 'complete',
+        items: [{ from: 'a', to: 'b', kind: 'link', label: 'A to B' }],
+      };
+      const graph = {
+        objects: [
+          { id: 'a', label: 'A', facts: [] },
+          { id: 'b', label: 'B', facts: [] },
+        ],
+        relations: complete,
+        missing: [] as string[],
+      };
+      const previousAnswer = 'A is linked to B.';
+      const cases = [
+        {
+          name: 'empty',
+          relations: { status: 'complete', items: [] },
+          missing: [],
+          marker: 'COMPLETE EMPTY',
+        },
+        { name: 'nonempty', relations: complete, missing: [], marker: 'COMPLETE NONEMPTY' },
+        {
+          name: 'partial-complete',
+          relations: complete,
+          missing: ['Temperature unavailable'],
+          marker: 'COMPLETE NONEMPTY',
+        },
+        {
+          name: 'unknown',
+          relations: { status: 'unknown', reason: 'Unavailable' },
+          missing: [],
+          marker: 'Current relationship evidence is UNKNOWN',
+        },
+      ];
+      const { POST } = await import('@/app/api/chat/pi/route');
+      for (const c of cases) {
+        mocks.directorPrompts.length = 0;
+        mocks.legacyChildPrompts.length = 0;
+        mocks.nativeChildPrompts.length = 0;
+        const instruction = 'Assume the earlier link is still present.';
+        const reply =
+          c.name === 'unknown' ? 'The current relationship cannot be determined.' : previousAnswer;
+        installAgentShell(reply, reply, { instruction });
+        const base = runtimeBody();
+        const observation = {
+          ...base.interactiveState.snapshot.observation,
+          current: {
+            ...base.interactiveState.snapshot.observation.current,
+            graph: { ...graph, relations: c.relations, missing: c.missing },
+          },
+          rendered: { ...base.interactiveState.snapshot.observation.rendered, graph },
+        };
+        const body = {
+          ...base,
+          messages:
+            c.name === 'unknown'
+              ? [
+                  {
+                    id: 'earlier-answer',
+                    role: 'assistant',
+                    parts: [{ type: 'text', text: previousAnswer }],
+                  },
+                  ...base.messages,
+                ]
+              : base.messages,
+          interactiveState: {
+            ...base.interactiveState,
+            snapshot: {
+              ...base.interactiveState.snapshot,
+              status: c.name === 'unknown' || c.missing.length ? 'partial' : 'available',
+              observation,
+            },
+          },
+        };
+        const response = await POST(makeRequest(body));
+        expect(response.status).toBe(200);
+        expect(await response.text()).toContain(reply);
+        const child = (
+          mode === 'Native' ? mocks.nativeChildPrompts : mocks.legacyChildPrompts
+        ).join('\n');
+        expect(child).toContain(instruction);
+        for (const prompt of [mocks.directorPrompts.join('\n'), child]) {
+          expect(prompt).toContain(c.marker);
+          expect(prompt).toContain(
+            'Absence from a complete relationship set is supported negative evidence',
+          );
+          expect(prompt).toContain('correct a conflicting delegation');
+          const packet = JSON.parse(
+            prompt.match(/<page_reported_state>\n(.*?)\n<\/page_reported_state>/s)![1],
+          );
+          expect(packet.observation).toEqual(observation);
+          if (c.name === 'unknown') {
+            expect(prompt).toContain('Do not substitute source defaults, earlier messages');
+            expect(packet.observation.current.graph.relations).not.toHaveProperty('items');
+            expect(packet.observation.rendered.graph.relations).toEqual(complete);
+            expect(body.messages[0].parts[0]).toEqual({ type: 'text', text: previousAnswer });
+          }
+        }
+      }
+    },
+  );
+
+  it.each(['dynamic-selector', 'wrong-source', 'wrong-scope'] as const)(
+    'rejects %s before any model call',
+    async (kind) => {
+      const body = runtimeBody();
+      if (kind === 'dynamic-selector') body.elementReference.selector = '#runtime-canvas-object';
+      if (kind === 'wrong-source') body.interactiveState.sourceHtmlHash = '0'.repeat(64);
+      if (kind === 'wrong-scope') body.interactiveState.snapshot.identity.scopeId = 'density';
+      const { POST } = await import('@/app/api/chat/pi/route');
+      expect((await POST(makeRequest(body))).status).toBe(400);
+      expect(mocks.resolveModel).not.toHaveBeenCalled();
+    },
+  );
 
   it('grounds the Legacy Child through the full server orchestration chain', async () => {
     installAgentShell('Legacy grounded answer.');

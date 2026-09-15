@@ -1338,8 +1338,36 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
 
     const handleToggleElementPick = useCallback(() => {
       if (!canPickElement) return;
+      if (
+        canPickInteractiveComponent &&
+        currentScene?.content.type === 'interactive' &&
+        currentScene.content.html?.includes('data-maic-observation')
+      ) {
+        // Quote the declared whole scope. Host still validates #experiment against source HTML.
+        const selectionVersion = ++selectionVersionRef.current;
+        setElementPickActive(false);
+        setDraftElementReference({
+          reference: {
+            kind: 'interactive_component',
+            sceneId: currentScene.id,
+            selector: '#experiment',
+          },
+          selectionVersion,
+          sceneOrder: currentSceneIndex >= 0 ? currentSceneIndex : currentScene.order,
+          elementType: 'interactive',
+          displaySummary: 'Interactive area',
+        });
+        return;
+      }
       setElementPickActive((active) => !active);
-    }, [canPickElement, setElementPickActive]);
+    }, [
+      canPickElement,
+      canPickInteractiveComponent,
+      currentScene,
+      currentSceneIndex,
+      setElementPickActive,
+      setDraftElementReference,
+    ]);
 
     useEffect(() => {
       if (whiteboardOpen || !canPickElement) setElementPickActive(false);

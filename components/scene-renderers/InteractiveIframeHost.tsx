@@ -1,6 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useLayoutEffect, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import {
+  createObservationSession,
+  withObservationResponder,
+} from '@/lib/interactive/observation-bridge';
 import { createPortal } from 'react-dom';
 import { useWidgetIframeStore } from '@/lib/store/widget-iframe';
 import {
@@ -232,6 +236,63 @@ function PooledIframe({
 }: PooledIframeProps) {
   const { t } = useI18n();
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const observation = useMemo(() => {
+    const identity = { sceneId, scopeId: 'experiment', documentId: crypto.randomUUID() };
+    return {
+      identity,
+      html: entry.srcDoc ? withObservationResponder(entry.srcDoc, identity) : undefined,
+    };
+  }, [entry.srcDoc, sceneId]);
+  const observationSession = useRef<ReturnType<typeof createObservationSession> | null>(null);
+  const registerObservation = useWidgetIframeStore((s) => s.registerObservation);
+  useLayoutEffect(() => {
+    observationSession.current?.dispose();
+    observationSession.current = null;
+    registerObservation(sceneId, async (sourceHtml, signal) => {
+      const pool = useInteractiveIframePool.getState();
+      const current = pool.entries[sceneId];
+      if (
+        pool.activeSceneId !== sceneId ||
+        !current?.owner ||
+        current.sourceHtml !== sourceHtml ||
+        current.srcDoc !== entry.srcDoc
+      )
+        return undefined;
+      const session = observationSession.current;
+      if (!session) return undefined;
+      const moved = new AbortController();
+      const unsubscribe = useInteractiveIframePool.subscribe((next) => {
+        if (
+          next.activeSceneId !== sceneId ||
+          next.entries[sceneId]?.owner !== current.owner ||
+          next.entries[sceneId]?.srcDoc !== entry.srcDoc
+        )
+          moved.abort();
+      });
+      let result;
+      try {
+        result = await session.capture({ signal: AbortSignal.any([signal, moved.signal]) });
+      } finally {
+        unsubscribe();
+      }
+      if (moved.signal.aborted) return undefined;
+      const latest = useInteractiveIframePool.getState();
+      if (
+        latest.activeSceneId !== sceneId ||
+        !latest.entries[sceneId]?.owner ||
+        latest.entries[sceneId]?.srcDoc !== entry.srcDoc ||
+        observationSession.current !== session ||
+        !session.isActive()
+      )
+        return undefined;
+      return result;
+    });
+    return () => {
+      observationSession.current?.dispose();
+      observationSession.current = null;
+      registerObservation(sceneId, null);
+    };
+  }, [sceneId, entry.srcDoc, registerObservation]);
   const registerIframe = useWidgetIframeStore((s) => s.registerIframe);
   const getSendMessage = useWidgetIframeStore((s) => s.getSendMessage);
   const pickTarget = useCanvasStore.use.pickTarget();
@@ -369,7 +430,14 @@ function PooledIframe({
     <div style={wrapStyle}>
       <iframe
         ref={iframeRef}
-        srcDoc={entry.srcDoc}
+        srcDoc={observation.html}
+        onLoad={() => {
+          observationSession.current?.dispose();
+          observationSession.current =
+            iframeRef.current && entry.srcDoc?.includes('data-maic-observation')
+              ? createObservationSession(iframeRef.current, observation.identity)
+              : null;
+        }}
         src={entry.srcDoc ? undefined : entry.src}
         style={iframeStyle}
         title={`Interactive Scene ${sceneId}`}

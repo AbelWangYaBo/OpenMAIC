@@ -1,5 +1,7 @@
 'use client';
 
+import { sampleInteractiveReference } from '@/lib/interactive/chat-observation';
+
 import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   nextChatUpdatedAt,
@@ -391,10 +393,16 @@ export async function runPiSingleRequest(
 ): Promise<void> {
   const consumer = createConsumer(sessionId, controller, sessionType);
   const persistenceHeaders = await getPersistenceRequestHeaders();
+  const interactiveState = await sampleInteractiveReference(
+    requestTemplate.elementReference,
+    requestTemplate.storeState,
+    controller.signal,
+  );
+  if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
   const response = await fetch('/api/chat/pi', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...persistenceHeaders },
-    body: JSON.stringify(requestTemplate),
+    body: JSON.stringify({ ...requestTemplate, ...(interactiveState ? { interactiveState } : {}) }),
     signal: controller.signal,
   });
 
