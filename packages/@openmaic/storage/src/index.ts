@@ -79,6 +79,7 @@ export {
   DEFAULT_ASSET_COLLECTION_BATCH_SIZE,
   DEFAULT_ASSET_COLLECTION_GRACE_MS,
   DEFAULT_ASSET_REFERENCE_BACKFILL_BATCH_SIZE,
+  type AssetCollectionEntryLevelFailure,
   type AssetCollectionPass,
   type AssetCollectorOptions,
 } from './asset/collector.js';

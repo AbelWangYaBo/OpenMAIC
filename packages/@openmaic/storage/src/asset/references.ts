@@ -228,13 +228,23 @@ export function documentAssetScopes(document: ScopedDocumentInput): DocumentAsse
 }
 
 /**
- * Candidates Postgres can carry as text parameters.
+ * Candidates Postgres can carry as text parameters, in a stable order.
  *
  * This is an encoding guard, not a check on the id domain: a NUL code point or
  * an unpaired surrogate is rejected by `text` and `jsonb` alike, so such a
  * value could not have reached a stored document in the first place, and
  * passing one down would fail the whole write transaction rather than lose one
  * reference. Ids themselves stay entirely unconstrained.
+ *
+ * Sorted because every array this produces becomes a `= ANY($1::text[])`, and
+ * each of those takes row locks on `asset_entries` -- directly, or through the
+ * `KEY SHARE` the reference table's foreign key takes on each row a ref row
+ * names. Two saves that share ids and arrive in document order would otherwise
+ * take the same locks in different orders and could deadlock each other. The
+ * SQL `ORDER BY id` on each locking statement is the authority, since the
+ * database's collation need not agree with JavaScript's code-unit order; this
+ * sort makes the parameter array match it in the common case and makes the
+ * intent visible at every call site.
  */
 function queryableCandidates(candidates: readonly string[]): string[] {
   const unique = new Set<string>();
@@ -242,7 +252,7 @@ function queryableCandidates(candidates: readonly string[]): string[] {
     if (typeof candidate !== 'string' || !isLosslessJsonString(candidate)) continue;
     unique.add(candidate);
   }
-  return [...unique];
+  return [...unique].sort();
 }
 
 async function referencedAssetIds(
@@ -289,7 +299,117 @@ export async function recordAssetReferenceTracking(queryable: Queryable): Promis
 }
 
 /**
- * Commit every entry the given scope of this stage now references.
+ * The row-lock strengths this module takes on `asset_entries`.
+ *
+ * `no-key-update` is what an `UPDATE` of a non-key column takes by itself, and
+ * `key-share` is what the reference table's foreign key takes on the entry a
+ * ref row names. Naming them here rather than inlining the SQL keeps every
+ * acquisition in this package to the two strengths whose interaction is
+ * reasoned about, and keeps the literal out of any caller's hands.
+ */
+type EntryLockStrength = 'no-key-update' | 'key-share';
+
+const ENTRY_LOCK_SQL: Record<EntryLockStrength, string> = {
+  'no-key-update': 'FOR NO KEY UPDATE',
+  'key-share': 'FOR KEY SHARE',
+};
+
+/**
+ * Take, in ONE ascending statement, every entry row lock the calling
+ * transaction is going to need.
+ *
+ * This is the package's whole answer to deadlocks on `asset_entries`, and it
+ * works only if it is complete and first. Two writers that each acquire their
+ * rows in one ascending sequence can never hold what the other wants; two
+ * writers that acquire in several sequences can, whatever each sequence is
+ * ordered by. That is not hypothetical: a full save writes one `INSERT INTO
+ * document_asset_refs` per scope, each of which makes the foreign key take
+ * `KEY SHARE` on the entries it names, so before this call existed a save
+ * acquired entry locks in scope order and could deadlock the collector's
+ * ascending legacy mark. Hence the rule every caller here follows:
+ *
+ * > Lock the union of every id the transaction will touch -- the ids it is
+ * > about to reference AND the ids it is about to stop referencing -- in
+ * > ascending order, before the first statement that writes
+ * > `document_asset_refs` or `asset_entries`.
+ *
+ * After that, the per-scope inserts' `KEY SHARE`, the commit `UPDATE` and the
+ * stamp `UPDATE` all touch rows this transaction already holds a lock on at
+ * least that strength, so none of them waits inside `asset_entries` again.
+ *
+ * The order is `ORDER BY id` in SQL rather than the order of the parameter
+ * array, so the database's collation decides it and every locking statement in
+ * this package agrees -- the collector's legacy mark
+ * (`AssetCollector.markLegacyBatch`) and its backfill included.
+ *
+ * Strength: `no-key-update` for a write that will update lifecycle columns,
+ * which is exactly what its `UPDATE`s take by themselves -- so this fixes the
+ * order without blocking anything that was not already blocked. `key-share`
+ * for the collector's insert-only backfill, which is exactly what its inserts'
+ * foreign keys take, for the same reason.
+ *
+ * Returns the ids that exist as entries. That is also the join that keeps ids
+ * opaque: a candidate with no entry locks nothing, and nothing downstream
+ * updates it.
+ */
+async function lockEntriesInOrder(
+  queryable: Queryable,
+  ids: readonly string[],
+  strength: EntryLockStrength,
+): Promise<string[]> {
+  if (ids.length === 0) return [];
+  const locked = await queryable.query<{ id: string }>(
+    `SELECT id
+       FROM asset_entries
+      WHERE id = ANY($1::text[])
+      ORDER BY id ASC
+        ${ENTRY_LOCK_SQL[strength]}`,
+    [ids],
+  );
+  return locked.rows.map((row) => row.id);
+}
+
+/**
+ * Take the whole transaction's entry locks for a reference-maintaining write.
+ *
+ * `next` is every id the write is about to reference, across every scope it
+ * touches; `previous` is every id it is about to stop referencing. Both halves
+ * are needed: the commit `UPDATE` touches the first and the stamp `UPDATE` the
+ * second, and locking them as two ordered sets in sequence would leave exactly
+ * the cycle this exists to remove -- a pair of saves whose commit set is the
+ * other's stamp set.
+ */
+async function lockWriteEntries(
+  queryable: Queryable,
+  next: readonly string[],
+  previous: readonly string[],
+): Promise<void> {
+  await lockEntriesInOrder(queryable, queryableCandidates([...next, ...previous]), 'no-key-update');
+}
+
+/**
+ * Take the backfill's entry locks for one document, ascending.
+ *
+ * The collector's walk inserts one scope's reference rows at a time, and each
+ * of those inserts makes the foreign key take `KEY SHARE` on the entries it
+ * names -- several sequences, in scope order, exactly the shape that can
+ * deadlock the mark's ascending `FOR UPDATE` on another instance. Taking the
+ * document's whole union at `key-share` first collapses those into one
+ * ascending sequence, and adds no conflict the inserts did not already have.
+ *
+ * Exported because the collector owns the transaction and the document read;
+ * it is the only caller, and calling it is part of the contract of
+ * {@link backfillDocumentAssetReferences}.
+ */
+export async function lockBackfillEntries(
+  queryable: Queryable,
+  candidates: readonly string[],
+): Promise<void> {
+  await lockEntriesInOrder(queryable, queryableCandidates(candidates), 'key-share');
+}
+
+/**
+ * Commit every entry the scopes just written now reference.
  *
  * `COALESCE(committed_at, now())` keeps the first document write's timestamp:
  * commit is "a document has named this id", which happens once. Clearing
@@ -297,23 +417,27 @@ export async function recordAssetReferenceTracking(queryable: Queryable): Promis
  * un-stamps an entry that a write is putting back -- an undo, a restore, or a
  * slower tab writing the same id back inside the grace period, all of which
  * are just a reference arriving again.
+ *
+ * `candidates` is what the caller just inserted rows from, rather than a
+ * re-read of `document_asset_refs`: the rows of a scope are exactly its
+ * candidates that exist as entries, and a candidate with no entry matches no
+ * row here either. No lock is taken -- {@link lockWriteEntries} already holds
+ * every one of these rows at `FOR NO KEY UPDATE`, so this statement cannot
+ * wait.
  */
 async function commitReferencedEntries(
   queryable: Queryable,
-  stageId: string,
-  scope: DocumentAssetScope,
+  candidates: readonly string[],
 ): Promise<void> {
+  const ids = queryableCandidates(candidates);
+  if (ids.length === 0) return;
   await queryable.query(
     `UPDATE asset_entries
         SET committed_at = COALESCE(committed_at, now()),
             expires_at = NULL,
             unreferenced_at = NULL
-      WHERE id IN (
-              SELECT asset_id
-                FROM document_asset_refs
-               WHERE stage_id = $1 AND scope = $2 AND scene_id = $3
-            )`,
-    [stageId, scope.scope, scope.sceneId],
+      WHERE id = ANY($1::text[])`,
+    [ids],
   );
 }
 
@@ -325,6 +449,13 @@ async function commitReferencedEntries(
  * `unreferenced_at IS NULL` guard makes the stamp the moment the LAST
  * reference went, so a document rewritten repeatedly cannot keep pushing an
  * entry's grace period out.
+ *
+ * Like the commit above, this takes no lock of its own: {@link lockWriteEntries}
+ * holds these rows already. The `NOT EXISTS` stays in this `UPDATE` rather
+ * than moving into that locking statement, so it is evaluated in a fresh READ
+ * COMMITTED snapshot -- `FOR NO KEY UPDATE` does not conflict with the
+ * `KEY SHARE` an insert-only reference writer takes, so a reference row can
+ * still commit after the lock was taken, and only a later snapshot sees it.
  */
 async function stampUnreferencedEntries(
   queryable: Queryable,
@@ -368,11 +499,20 @@ async function insertScopeRows(
   // no row and no error. Bytes are stored before any document can name the id
   // they were stored under, so this join loses nothing a document really
   // holds.
+  //
+  // Ordered because each inserted row makes the foreign key take `KEY SHARE`
+  // on the entry it names, in the order the rows are produced. Under the
+  // union lock every caller takes first, this statement can no longer wait for
+  // any of those rows -- the transaction already holds them -- so the ordering
+  // is the second line of defence rather than the first: it keeps this
+  // statement harmless for any future caller that reaches it without the union
+  // lock, and it costs a sort over at most one scope's ids.
   await queryable.query(
     `INSERT INTO document_asset_refs (stage_id, scope, scene_id, asset_id)
      SELECT $1, $2, $3, entries.id
        FROM asset_entries AS entries
       WHERE entries.id = ANY($4::text[])
+      ORDER BY entries.id ASC
      ON CONFLICT DO NOTHING`,
     [stageId, scope.scope, scope.sceneId, ids],
   );
@@ -398,10 +538,13 @@ export async function syncDocumentAssetReferences(
 ): Promise<void> {
   const { stageId, scope } = input;
   const previous = await referencedAssetIds(queryable, stageId, scope);
+  // Every entry lock this transaction will need, ascending, before the first
+  // write to either table -- see lockEntriesInOrder.
+  await lockWriteEntries(queryable, scope.candidates, previous);
   await recordAssetReferenceTracking(queryable);
   await forgetDocumentAssetWithdrawal(queryable, stageId);
   await replaceScopeRows(queryable, stageId, scope);
-  await commitReferencedEntries(queryable, stageId, scope);
+  await commitReferencedEntries(queryable, scope.candidates);
   await stampUnreferencedEntries(queryable, previous);
 }
 
@@ -420,6 +563,13 @@ export interface SyncStageAssetReferencesInput {
  * simply contribute no scope, so their rows do not come back. Rows are
  * inserted for every scope before any entry is committed, so two scopes naming
  * the same id cannot have one of them stamp it unreferenced.
+ *
+ * Every entry lock the transaction needs is taken up front, over the union of
+ * every scope's candidates AND every id the stage referenced before, in one
+ * ascending statement -- see {@link lockEntriesInOrder} for why the union and
+ * the single statement are both load-bearing. The commit is then ONE call over
+ * the same union rather than one call per scope; a scene contributing an id
+ * another scene already contributed is committed once, as it was before.
  */
 export async function syncStageAssetReferences(
   queryable: Queryable,
@@ -427,15 +577,15 @@ export async function syncStageAssetReferences(
 ): Promise<void> {
   const { stageId, scopes } = input;
   const previous = await referencedAssetIds(queryable, stageId);
+  const next = scopes.flatMap((scope) => [...scope.candidates]);
+  await lockWriteEntries(queryable, next, previous);
   await recordAssetReferenceTracking(queryable);
   await forgetDocumentAssetWithdrawal(queryable, stageId);
   await queryable.query('DELETE FROM document_asset_refs WHERE stage_id = $1', [stageId]);
   for (const scope of scopes) {
     await insertScopeRows(queryable, stageId, scope);
   }
-  for (const scope of scopes) {
-    await commitReferencedEntries(queryable, stageId, scope);
-  }
+  await commitReferencedEntries(queryable, next);
   await stampUnreferencedEntries(queryable, previous);
 }
 
@@ -464,6 +614,7 @@ export async function removeDocumentAssetReferences(
   const scope: DocumentAssetScope | undefined =
     sceneId === undefined ? undefined : { scope: 'scene', sceneId, candidates: [] };
   const previous = await referencedAssetIds(queryable, stageId, scope);
+  await lockWriteEntries(queryable, [], previous);
   await recordAssetReferenceTracking(queryable);
   if (scope === undefined) {
     await queryable.query('DELETE FROM document_asset_refs WHERE stage_id = $1', [stageId]);

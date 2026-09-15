@@ -15,8 +15,10 @@ import { DSL_VERSION } from '@openmaic/dsl';
 import type { Scene } from '@openmaic/dsl';
 import type { AssetByteStore } from '../src/asset/byte-store.js';
 import {
+  AssetCollectionFailure,
   AssetCollector,
   AssetReferenceTrackingNotEnabledError,
+  type AssetCollectionEntryLevelFailure,
   type AssetCollectionPass,
   type AssetCollectorOptions,
 } from '../src/asset/collector.js';
@@ -27,6 +29,7 @@ import {
   PgAssetStore,
   ensureAssetSchema,
   type PgAssetStoreOptions,
+  type QueryResult,
   type Queryable,
   type WithTransaction,
 } from '../src/asset/pg.js';
@@ -36,6 +39,7 @@ import {
   sceneAssetScope,
   stageAssetScope,
   syncDocumentAssetReferences,
+  syncStageAssetReferences,
 } from '../src/asset/references.js';
 import { AssetQuotaExceededError } from '../src/asset/types.js';
 import { PgDocumentStore, ensureDocumentSchema } from '../src/document/pg.js';
@@ -496,6 +500,167 @@ describe('asset entry lifecycle with PGlite', () => {
       // And an unknown id is still the same no-op it was before the cascade.
       await expect(store.remove(PRINCIPAL, 'ast_unknown')).resolves.toBeUndefined();
       await expect(store.remove({ key: 'other' }, id)).resolves.toBeUndefined();
+    });
+
+    describe('entry locks are taken in one agreed order', () => {
+      /**
+       * Two saves of different documents that share asset ids -- a slide
+       * copied between two courses, then both edited -- each lock the entry
+       * rows they touch. Unordered, they can hold what the other wants and
+       * deadlock, and the victim's save is aborted. The order is asserted on
+       * the SQL because that is what the guarantee actually is: a statement
+       * that names the rows and orders them, ahead of the UPDATE.
+       */
+      const entryUnder = async (id: string, value: string): Promise<void> => {
+        const minted = await store.put(PRINCIPAL, new Blob([value]));
+        await db.query('UPDATE asset_entries SET id = $2 WHERE id = $1', [minted, id]);
+      };
+
+      /** Every statement one call issued, in order, with its parameters. */
+      const recorded = (log: { text: string; params?: unknown[] }[]): Queryable => ({
+        query: async <TRow extends Record<string, unknown> = Record<string, unknown>>(
+          text: string,
+          params?: unknown[],
+        ) => {
+          log.push({ text, params });
+          return db.query<TRow>(text, params);
+        },
+      });
+
+      const lockStatements = (
+        log: { text: string; params?: unknown[] }[],
+      ): { text: string; params?: unknown[] }[] =>
+        log.filter((statement) => statement.text.includes('FOR NO KEY UPDATE'));
+
+      beforeEach(async () => {
+        // Deliberately not in id order, so following the document's order
+        // would be visible.
+        await entryUnder('lock-c', 'third');
+        await entryUnder('lock-a', 'first');
+        await entryUnder('lock-b', 'second');
+      });
+
+      test('a save locks the entries it commits, sorted, before updating them', async () => {
+        const log: { text: string; params?: unknown[] }[] = [];
+
+        await syncDocumentAssetReferences(recorded(log), {
+          stageId: 'lock-stage',
+          scope: {
+            scope: 'scene',
+            sceneId: 'scene-a',
+            candidates: ['lock-c', 'lock-a', 'lock-b'],
+          },
+        });
+
+        const locks = lockStatements(log);
+        expect(locks).toHaveLength(1);
+        expect(locks[0]?.text).toMatch(/ORDER BY id ASC/);
+        expect(locks[0]?.params?.[0]).toEqual(['lock-a', 'lock-b', 'lock-c']);
+        // The lock comes first, and the reference insert -- whose foreign key
+        // takes KEY SHARE on each entry it names -- is ordered too.
+        const lockAt = log.findIndex((statement) => statement.text.includes('FOR NO KEY UPDATE'));
+        const commitAt = log.findIndex((statement) =>
+          statement.text.includes('SET committed_at = COALESCE'),
+        );
+        expect(commitAt).toBeGreaterThan(lockAt);
+        expect(
+          log.find((statement) => statement.text.includes('INSERT INTO document_asset_refs'))?.text,
+        ).toMatch(/ORDER BY entries\.id ASC/);
+        // And it still did what it is for.
+        expect(await refRows()).toHaveLength(3);
+      });
+
+      test('a whole-stage save orders its locks across every scope, not within each', async () => {
+        // Per-scope locking would order each scope's ids and still let two
+        // saves whose scopes hold the ids in different scopes acquire them in
+        // conflicting orders. One call over the union closes that.
+        const log: { text: string; params?: unknown[] }[] = [];
+
+        await syncStageAssetReferences(recorded(log), {
+          stageId: 'lock-stage',
+          scopes: [
+            { scope: 'stage', sceneId: '', candidates: ['lock-c'] },
+            { scope: 'scene', sceneId: 'scene-a', candidates: ['lock-b'] },
+            { scope: 'scene', sceneId: 'scene-b', candidates: ['lock-a'] },
+          ],
+        });
+
+        const locks = lockStatements(log);
+        expect(locks).toHaveLength(1);
+        expect(locks[0]?.params?.[0]).toEqual(['lock-a', 'lock-b', 'lock-c']);
+        expect(await refRows()).toHaveLength(3);
+        for (const id of ['lock-a', 'lock-b', 'lock-c']) {
+          expect((await lifecycleOf(id))?.committed_at).not.toBeNull();
+        }
+      });
+
+      test('the stamp locks the entries it releases, sorted, before updating them', async () => {
+        await syncDocumentAssetReferences(db, {
+          stageId: 'lock-stage',
+          scope: {
+            scope: 'scene',
+            sceneId: 'scene-a',
+            candidates: ['lock-c', 'lock-a', 'lock-b'],
+          },
+        });
+        const log: { text: string; params?: unknown[] }[] = [];
+
+        await removeDocumentAssetReferences(recorded(log), {
+          stageId: 'lock-stage',
+          sceneId: 'scene-a',
+        });
+
+        const locks = lockStatements(log);
+        expect(locks).toHaveLength(1);
+        expect(locks[0]?.text).toMatch(/ORDER BY id ASC/);
+        expect(locks[0]?.params?.[0]).toEqual(['lock-a', 'lock-b', 'lock-c']);
+        const lockAt = log.findIndex((statement) => statement.text.includes('FOR NO KEY UPDATE'));
+        const stampAt = log.findIndex((statement) =>
+          statement.text.includes('SET unreferenced_at = now()'),
+        );
+        expect(stampAt).toBeGreaterThan(lockAt);
+        for (const id of ['lock-a', 'lock-b', 'lock-c']) {
+          expect((await lifecycleOf(id))?.unreferenced_at).not.toBeNull();
+        }
+      });
+
+      test('the lock covers what the write drops as well as what it adds, and precedes every write', async () => {
+        // One ordered statement is only a guarantee if it is complete and
+        // first. Locking the commit set and the stamp set as two sequences
+        // leaves a pair of saves whose commit set is the other's stamp set
+        // able to cycle; taking any entry lock before it -- as each scope's
+        // reference INSERT did through its foreign key -- leaves the same
+        // hole against the collector's ascending mark.
+        await entryUnder('lock-d', 'fourth');
+        await syncDocumentAssetReferences(db, {
+          stageId: 'lock-stage',
+          scope: { scope: 'scene', sceneId: 'scene-a', candidates: ['lock-d', 'lock-b'] },
+        });
+        const log: { text: string; params?: unknown[] }[] = [];
+
+        // Now name a different pair: 'lock-b' stays, 'lock-d' is dropped,
+        // 'lock-a' and 'lock-c' arrive.
+        await syncDocumentAssetReferences(recorded(log), {
+          stageId: 'lock-stage',
+          scope: { scope: 'scene', sceneId: 'scene-a', candidates: ['lock-c', 'lock-a'] },
+        });
+
+        const locks = lockStatements(log);
+        expect(locks).toHaveLength(1);
+        // The union of both halves, sorted: nothing is locked in a second
+        // sequence later on.
+        expect(locks[0]?.params?.[0]).toEqual(['lock-a', 'lock-b', 'lock-c', 'lock-d']);
+        const lockAt = log.findIndex((statement) => statement.text.includes('FOR NO KEY UPDATE'));
+        const firstWriteAt = log.findIndex(
+          (statement) =>
+            statement.text.includes('document_asset_refs') && !statement.text.startsWith('SELECT'),
+        );
+        expect(firstWriteAt).toBeGreaterThan(lockAt);
+        // And the write itself is unchanged.
+        expect((await refRows()).map((row) => row.asset_id)).toEqual(['lock-a', 'lock-c']);
+        expect((await lifecycleOf('lock-d'))?.unreferenced_at).not.toBeNull();
+        expect((await lifecycleOf('lock-b'))?.unreferenced_at).not.toBeNull();
+      });
     });
   });
 
@@ -1280,6 +1445,203 @@ describe('asset entry lifecycle with PGlite', () => {
         { stage_id: 'stage-1', scope: 'stage', scene_id: '', asset_id: 'legacy-stage' },
       ]);
       expect((await lifecycleOf('legacy-stage'))?.unreferenced_at).toBeNull();
+    });
+
+    test('the legacy mark and stamp cross bounded batches', async () => {
+      // More legacy entries than one batch holds, so the mark has to loop --
+      // and the stamp has to tell referenced from unreferenced WITHIN a batch
+      // as well as across them.
+      for (const index of [0, 1, 2, 3, 4]) {
+        await legacyEntry(`legacy-${index}`, `legacy ${index}`);
+      }
+      await documentStore(false).saveDocument(
+        documentWith('stage-1', [sceneWithImages('stage-1', 'scene-a', 0, ['legacy-3'])]),
+      );
+      // Counted rather than assumed: the point of the rework is that no single
+      // transaction holds locks over the whole legacy set.
+      let markTransactions = 0;
+      const counting: WithTransaction = (body) =>
+        transactions(db)((queryable) =>
+          body({
+            async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+              text: string,
+              params?: unknown[],
+            ): Promise<QueryResult<TRow>> {
+              if (text.includes('committed_at IS NULL AND expires_at IS NULL')) {
+                markTransactions += 1;
+              }
+              return queryable.query<TRow>(text, params);
+            },
+          }),
+        );
+
+      const pass = await collector({
+        graceMs: GRACE_MS,
+        batchSize: 2,
+        withTransaction: counting,
+      }).collectPass();
+
+      // Every one of them, counted once, across three batches of two.
+      expect(markTransactions).toBe(3);
+      expect(pass.legacyEntriesCommitted).toBe(5);
+      for (const index of [0, 1, 2, 3, 4]) {
+        expect((await lifecycleOf(`legacy-${index}`))?.committed_at).not.toBeNull();
+      }
+      // (iii) for the four nothing names, and not for the one a document does.
+      for (const index of [0, 1, 2, 4]) {
+        expect((await lifecycleOf(`legacy-${index}`))?.unreferenced_at).not.toBeNull();
+      }
+      expect((await lifecycleOf('legacy-3'))?.unreferenced_at).toBeNull();
+      // The gate is open now, and nothing was released on the marking pass.
+      expect(pass.entriesCollected).toBe(0);
+    });
+
+    test('a mark interrupted part way keeps the gate shut and resumes on the next pass', async () => {
+      // What makes batching safe: a batch that fails leaves its rows legacy,
+      // which is a fact in the database rather than in this process, so the
+      // gate stays shut and the next pass continues where the failure left
+      // off. Nothing marked is ever unmarked.
+      for (const index of [0, 1, 2, 3]) {
+        await legacyEntry(`legacy-${index}`, `legacy ${index}`);
+      }
+      await documentStore(false).saveDocument(documentWith('stage-1', []));
+      let batches = 0;
+      const failingSecondBatch: WithTransaction = (body) =>
+        transactions(db)((queryable) =>
+          body({
+            async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+              text: string,
+              params?: unknown[],
+            ): Promise<QueryResult<TRow>> {
+              if (text.includes('committed_at IS NULL AND expires_at IS NULL')) {
+                batches += 1;
+                if (batches === 2) throw new Error('injected mark failure');
+              }
+              return queryable.query<TRow>(text, params);
+            },
+          }),
+        );
+
+      await expect(
+        collector({
+          graceMs: GRACE_MS,
+          batchSize: 2,
+          withTransaction: failingSecondBatch,
+        }).collectPass(),
+      ).rejects.toBeInstanceOf(AssetCollectionFailure);
+
+      // The first batch's work stands; the rest is still legacy.
+      const marked = await db.query<{ id: string }>(
+        `SELECT id FROM asset_entries WHERE committed_at IS NOT NULL ORDER BY id`,
+      );
+      expect(marked.rows.map((row) => row.id)).toEqual(['legacy-0', 'legacy-1']);
+
+      const resumed = await collector({ graceMs: GRACE_MS, batchSize: 2 }).collectPass();
+
+      expect(resumed.legacyEntriesCommitted).toBe(2);
+      for (const index of [0, 1, 2, 3]) {
+        const row = await lifecycleOf(`legacy-${index}`);
+        expect(row?.committed_at).not.toBeNull();
+        expect(row?.unreferenced_at).not.toBeNull();
+      }
+    });
+
+    test('an entry-level failure still lets the blob pass run, and is raised after it', async () => {
+      // The entry level and the byte level are independent, and the byte level
+      // is correct on its own. A throw out of the entry level used to
+      // propagate before the blob candidate query, so a pass that hit a lock
+      // timeout on the mark or a document it could not read reclaimed no bytes
+      // at all -- while the collector's own comment and reference-server.md
+      // both said the blob pass still ran.
+      await legacyEntry('legacy-blocked', 'legacy blocked');
+      await documentStore(false).saveDocument(documentWith('stage-1', []));
+      const doomed = await store.put(PRINCIPAL, new Blob(['collectable bytes']));
+      await store.remove(PRINCIPAL, doomed);
+      await db.query(
+        `UPDATE asset_blobs SET unreferenced_at = '2000-01-01T00:00:00.000Z'
+          WHERE NOT EXISTS (
+                SELECT 1 FROM asset_entries WHERE content_hash = asset_blobs.content_hash
+              )`,
+      );
+      expect((await db.query('SELECT content_hash FROM asset_blobs')).rows).toHaveLength(2);
+      // The backfill's own read of the document, inside the transaction that
+      // would insert its rows: a real statement in a real collector
+      // transaction, so the failure travels the path a lock timeout would.
+      const failingBackfill: WithTransaction = (body) =>
+        transactions(db)((queryable) =>
+          body({
+            async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+              text: string,
+              params?: unknown[],
+            ): Promise<QueryResult<TRow>> {
+              if (text.includes('document_stages')) throw new Error('injected walk failure');
+              return queryable.query<TRow>(text, params);
+            },
+          }),
+        );
+
+      const failure = await collector({ graceMs: 0, withTransaction: failingBackfill })
+        .collectPass()
+        .catch((error: unknown) => error);
+
+      // The entry level failed, and still says which document stalled it...
+      expect(failure).toBeInstanceOf(AssetCollectionFailure);
+      expect((failure as AssetCollectionFailure).stageId).toBe('stage-1');
+      // ...raised only after the blob pass had reclaimed the eligible bytes.
+      const blobs = await db.query<{ unreferenced_at: Date | null }>(
+        'SELECT unreferenced_at FROM asset_blobs',
+      );
+      expect(blobs.rows).toHaveLength(1);
+      expect(blobs.rows[0]?.unreferenced_at).toBeNull();
+      // And the entry level itself did nothing: a failed walk marks nothing,
+      // so invariant (i) still holds the gate shut.
+      expect((await lifecycleOf('legacy-blocked'))?.committed_at).toBeNull();
+    });
+
+    test('a blob-pass failure takes precedence and carries the entry-level failure', async () => {
+      // The entry-level failure is recorded and raised after the blob pass --
+      // unless the blob pass throws too, and then it is the blob failure that
+      // stopped the pass and the entry failure would be lost. It travels on
+      // the raised error instead.
+      await legacyEntry('legacy-masked', 'legacy masked');
+      await documentStore(false).saveDocument(documentWith('stage-1', []));
+      const doomed = await store.put(PRINCIPAL, new Blob(['doomed bytes']));
+      await store.remove(PRINCIPAL, doomed);
+      await db.query(
+        `UPDATE asset_blobs SET unreferenced_at = '2000-01-01T00:00:00.000Z'
+          WHERE NOT EXISTS (
+                SELECT 1 FROM asset_entries WHERE content_hash = asset_blobs.content_hash
+              )`,
+      );
+      const failingBoth: WithTransaction = (body) =>
+        transactions(db)((queryable) =>
+          body({
+            async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+              text: string,
+              params?: unknown[],
+            ): Promise<QueryResult<TRow>> {
+              if (text.includes('document_stages')) throw new Error('injected walk failure');
+              if (text.includes('asset_blobs') && text.includes('FOR UPDATE')) {
+                throw new Error('injected blob failure');
+              }
+              return queryable.query<TRow>(text, params);
+            },
+          }),
+        );
+
+      const failure = await collector({ graceMs: 0, withTransaction: failingBoth })
+        .collectPass()
+        .catch((error: unknown) => error);
+
+      // The blob failure is what surfaced: it names no document, and its own
+      // cause is the injected blob error.
+      expect(failure).toBeInstanceOf(AssetCollectionFailure);
+      expect((failure as AssetCollectionFailure).stageId).toBeUndefined();
+      expect((failure as Error).cause).toMatchObject({ message: 'injected blob failure' });
+      // And the entry-level failure rode along rather than being dropped.
+      const carried = (failure as AssetCollectionEntryLevelFailure).entryLevelFailure;
+      expect(carried).toBeInstanceOf(AssetCollectionFailure);
+      expect((carried as AssetCollectionFailure).stageId).toBe('stage-1');
     });
 
     test('a deployment with no legacy entry never walks a document', async () => {

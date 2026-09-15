@@ -16,7 +16,11 @@ import {
   AssetCollectionFailure,
   AssetReferenceTrackingNotEnabledError,
 } from '../src/asset/collector.js';
-import { backfillDocumentAssetReferences, sceneAssetScope } from '../src/asset/references.js';
+import {
+  backfillDocumentAssetReferences,
+  sceneAssetScope,
+  syncStageAssetReferences,
+} from '../src/asset/references.js';
 import {
   DocumentAssetReferencesDisabledError,
   PgDocumentStore,
@@ -874,6 +878,449 @@ describe.skipIf(!contractUrl)('document asset references with PostgreSQL 16', ()
     expect(
       (await pool.query('SELECT 1 FROM document_asset_refs WHERE asset_id = $1', [legacy])).rows,
     ).toHaveLength(1);
+  });
+
+  test('the legacy mark honours a reference that arrives between two batches', async () => {
+    // The mark used to lock every legacy row, and then every committed
+    // unstamped row, in ONE transaction: every healthy entry on the
+    // deployment, held for as long as the slowest lock took. Batched, each
+    // transaction covers at most `batchSize` ids -- which means the database
+    // can change underneath the walk between batches, and the batch that
+    // arrives at a newly referenced entry must see the reference rather than
+    // the snapshot it paged its candidates in.
+    await documents.saveDocument(stageWithImage('batch-stage', 'batch-scene', 'unallocated'));
+    const legacy: string[] = [];
+    for (const index of [0, 1, 2, 3, 4, 5, 6]) {
+      const minted = await assets.put(principal, new Blob([`legacy batch ${index}`]));
+      const id = `legacy-batch-${index}`;
+      await pool.query(
+        `UPDATE asset_entries
+            SET id = $2, committed_at = NULL, expires_at = NULL, unreferenced_at = NULL
+          WHERE id = $1`,
+        [minted, id],
+      );
+      legacy.push(id);
+    }
+    // Between the first batch and the second, a document starts naming an id
+    // the second batch is about to reach. Committed on its own connection, so
+    // only a statement taking a fresh snapshot can see it.
+    const lateReference = 'legacy-batch-5';
+    let markBatches = 0;
+    const observing: WithTransaction = async (body) => {
+      let isMarkBatch = false;
+      const result = await transactionFor(pool)((queryable) =>
+        body({
+          async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+            text: string,
+            params?: unknown[],
+          ): Promise<QueryResult<TRow>> {
+            if (text.includes('committed_at IS NULL AND expires_at IS NULL')) isMarkBatch = true;
+            return queryable.query<TRow>(text, params);
+          },
+        }),
+      );
+      if (isMarkBatch) {
+        markBatches += 1;
+        if (markBatches === 1) {
+          await pool.query(
+            `INSERT INTO document_asset_refs (stage_id, scope, scene_id, asset_id)
+             VALUES ('late-batch-stage', 'scene', 'late-batch-scene', $1)`,
+            [lateReference],
+          );
+        }
+      }
+      return result;
+    };
+
+    const pass = await new AssetCollector(pool as Queryable, bytes, {
+      withTransaction: observing,
+      documentReferences: true,
+      graceMs: 60 * 60 * 1000,
+      batchSize: 3,
+    }).collectPass();
+
+    // Seven ids in batches of three: three transactions, none of them holding
+    // more than three row locks.
+    expect(markBatches).toBe(3);
+    expect(pass.legacyEntriesCommitted).toBe(7);
+    const rows = await pool.query<{ id: string; committed_at: Date | null; stamped: boolean }>(
+      `SELECT id, committed_at, (unreferenced_at IS NOT NULL) AS stamped
+         FROM asset_entries
+        WHERE id = ANY($1::text[])
+        ORDER BY id`,
+      [legacy],
+    );
+    expect(rows.rows.map((row) => row.id)).toEqual(legacy);
+    expect(rows.rows.filter((row) => row.committed_at === null)).toEqual([]);
+    // Every one but the late-referenced id is stamped, and that one is not:
+    // it is marked committed like the rest, and left alone.
+    expect(rows.rows.filter((row) => !row.stamped).map((row) => row.id)).toEqual([lateReference]);
+    // The stamps are `now()`, so nothing drained on the marking pass.
+    expect(pass.entriesCollected).toBe(0);
+  });
+
+  describe('the standing sweep for entries nothing references any more', () => {
+    const stampedIds = async (): Promise<string[]> => {
+      const rows = await pool.query<{ id: string }>(
+        'SELECT id FROM asset_entries WHERE unreferenced_at IS NOT NULL ORDER BY id',
+      );
+      return rows.rows.map((row) => row.id);
+    };
+    const hour = 60 * 60 * 1000;
+    const sweeping = (batchSize?: number): AssetCollector =>
+      new AssetCollector(pool as Queryable, bytes, {
+        withTransaction: transactionFor(pool),
+        documentReferences: true,
+        graceMs: hour,
+        ...(batchSize === undefined ? {} : { batchSize }),
+      });
+
+    test('a committed entry no document references is stamped, and drains after grace', async () => {
+      // The legacy mark cannot reach this row -- it is committed, so it is not
+      // legacy -- and no document write will either, because the reference row
+      // went without one: a deleteDocument through a store with
+      // trackAssetReferences off, a partial restore, rows removed out of band.
+      // Nothing else in the system ever looks at such a row again:
+      // releaseEntries takes only entries with expires_at or unreferenced_at
+      // set, and the blob pass refuses a blob while any entry names it. The
+      // entry, its bytes and its share of the principal quota were held
+      // forever.
+      const id = await assets.put(principal, new Blob(['orphaned bytes']));
+      await documents.saveDocument(stageWithImage('orphan-stage', 'orphan-scene', id));
+      await pool.query('DELETE FROM document_asset_refs WHERE asset_id = $1', [id]);
+      // The gate is open: nothing on this database is legacy.
+      expect(
+        (
+          await pool.query(
+            'SELECT 1 FROM asset_entries WHERE committed_at IS NULL AND expires_at IS NULL',
+          )
+        ).rows,
+      ).toEqual([]);
+      expect(await stampedIds()).toEqual([]);
+
+      const collector = sweeping();
+      expect((await collector.collectPass()).entriesCollected).toBe(0);
+
+      expect(await stampedIds()).toEqual([id]);
+      // (iii): the stamp is now(), so it drains after the grace period rather
+      // than on the pass that stamped it.
+      expect((await collector.collectPass()).entriesCollected).toBe(0);
+      await pool.query(
+        `UPDATE asset_entries SET unreferenced_at = now() - interval '2 hours' WHERE id = $1`,
+        [id],
+      );
+      expect((await collector.collectPass()).entriesCollected).toBe(1);
+      expect((await pool.query('SELECT id FROM asset_entries WHERE id = $1', [id])).rows).toEqual(
+        [],
+      );
+    });
+
+    test('the sweep takes one bounded batch per pass and wraps at the end', async () => {
+      // Four committed entries, three of them referenced. With a batch of two
+      // the orphan is out of reach of the first pass: only a cursor that
+      // advances gets to it, and only a cursor that wraps gets back to an
+      // entry orphaned behind it.
+      for (const index of [1, 2, 3, 4]) {
+        const minted = await assets.put(principal, new Blob([`sweep ${index}`]));
+        await pool.query(
+          `UPDATE asset_entries
+              SET id = $2, committed_at = now(), expires_at = NULL, unreferenced_at = NULL
+            WHERE id = $1`,
+          [minted, `sweep-${index}`],
+        );
+      }
+      await pool.query(
+        `INSERT INTO document_asset_refs (stage_id, scope, scene_id, asset_id)
+         SELECT 'sweep-stage', 'scene', 'sweep-scene', id FROM unnest($1::text[]) AS id`,
+        [['sweep-1', 'sweep-2', 'sweep-3']],
+      );
+      await documents.declareAssetReferenceTracking();
+      const collector = sweeping(2);
+
+      // Pass one reaches sweep-1 and sweep-2; both are referenced.
+      await collector.collectPass();
+      expect(await stampedIds()).toEqual([]);
+
+      // Pass two reaches sweep-3 (referenced) and sweep-4 (the orphan).
+      await collector.collectPass();
+      expect(await stampedIds()).toEqual(['sweep-4']);
+
+      // An entry BEHIND the cursor loses its last reference the same way.
+      await pool.query(`DELETE FROM document_asset_refs WHERE asset_id = 'sweep-1'`);
+
+      // Pass three finds nothing past the cursor and wraps rather than
+      // stopping there forever.
+      await collector.collectPass();
+      expect(await stampedIds()).toEqual(['sweep-4']);
+
+      // Pass four is back at the start.
+      await collector.collectPass();
+      expect(await stampedIds()).toEqual(['sweep-1', 'sweep-4']);
+    });
+
+    test('nothing is swept while the walk is unfinished', async () => {
+      // Invariant (i) again: while a legacy entry exists the reference table
+      // is a subset of the truth, so "no reference row" does not yet mean "no
+      // document names it". Sweeping on that basis would start a grace period
+      // for media a document still holds.
+      // Committed, referenced by nothing, and named by no stored document --
+      // so the walk cannot put its reference row back and only the sweep can
+      // reach it.
+      const orphan = await assets.put(principal, new Blob(['gated orphan']));
+      await pool.query(
+        `UPDATE asset_entries SET committed_at = now(), expires_at = NULL WHERE id = $1`,
+        [orphan],
+      );
+      const legacy = await assets.put(principal, new Blob(['gate keeper']));
+      await pool.query(
+        `UPDATE asset_entries SET committed_at = NULL, expires_at = NULL WHERE id = $1`,
+        [legacy],
+      );
+      // Two documents and one document per chunk, so the first pass cannot
+      // finish the walk and the gate stays shut.
+      await documents.saveDocument(stageWithImage('gated-stage', 'gated-scene', 'unallocated'));
+      await documents.saveDocument(stageWithImage('gated-other', 'gated-scene', 'unallocated'));
+
+      const paced = new AssetCollector(pool as Queryable, bytes, {
+        withTransaction: transactionFor(pool),
+        documentReferences: true,
+        graceMs: hour,
+        referenceBackfillBatchSize: 1,
+      });
+      const first = await paced.collectPass();
+
+      expect(first.legacyEntriesCommitted).toBe(0);
+      expect(await stampedIds()).toEqual([]);
+
+      // Once the walk finishes and the mark runs, the gate opens and the same
+      // orphan is swept.
+      await paced.collectPass();
+      expect(await stampedIds()).toContain(orphan);
+    });
+  });
+
+  test('two full saves whose scopes cross the same ids both complete', async () => {
+    // P2: a save used to take its entry locks in as many sequences as it had
+    // scopes -- each scope's reference INSERT makes the foreign key take
+    // KEY SHARE on the entries it names -- plus one more for the commit and
+    // one for the stamp. Two saves whose commit set is the other's stamp set
+    // could then hold what the other wanted. One ascending union lock at the
+    // top of the transaction makes the second save queue instead.
+    const ids: string[] = [];
+    for (const name of ['cross-a', 'cross-z']) {
+      const minted = await assets.put(principal, new Blob([`bytes ${name}`]));
+      await pool.query('UPDATE asset_entries SET id = $2 WHERE id = $1', [minted, name]);
+      ids.push(name);
+    }
+    // Crossed starting state: X holds cross-z, Y holds cross-a.
+    await syncStageAssetReferences(pool as Queryable, {
+      stageId: 'cross-x',
+      scopes: [{ scope: 'stage', sceneId: '', candidates: ['cross-z'] }],
+    });
+    await syncStageAssetReferences(pool as Queryable, {
+      stageId: 'cross-y',
+      scopes: [{ scope: 'stage', sceneId: '', candidates: ['cross-a'] }],
+    });
+
+    let reachedLock!: () => void;
+    const atLock = new Promise<void>((resolve) => {
+      reachedLock = resolve;
+    });
+    let release!: () => void;
+    const mayProceed = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pausingAtTheLock: WithTransaction = async (body) =>
+      transactionFor(pool)((queryable) =>
+        body({
+          async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+            text: string,
+            params?: unknown[],
+          ): Promise<QueryResult<TRow>> {
+            const answer = await queryable.query<TRow>(text, params);
+            if (text.includes('FOR NO KEY UPDATE')) {
+              reachedLock();
+              await mayProceed;
+            }
+            return answer;
+          },
+        }),
+      );
+
+    // X now names cross-a (which Y is about to drop) and drops cross-z (which
+    // Y is about to name), each in a different scope, higher id first.
+    const savingX = pausingAtTheLock((queryable) =>
+      syncStageAssetReferences(queryable, {
+        stageId: 'cross-x',
+        scopes: [
+          { scope: 'stage', sceneId: '', candidates: [] },
+          { scope: 'scene', sceneId: 'x-scene', candidates: ['cross-a'] },
+        ],
+      }),
+    ).then(
+      () => 'committed',
+      (error: unknown) => `failed: ${String(error)}`,
+    );
+    await atLock;
+
+    const savingY = transactionFor(pool)((queryable) =>
+      syncStageAssetReferences(queryable, {
+        stageId: 'cross-y',
+        scopes: [
+          { scope: 'stage', sceneId: '', candidates: ['cross-z'] },
+          { scope: 'scene', sceneId: 'y-scene', candidates: [] },
+        ],
+      }),
+    ).then(
+      () => 'committed',
+      (error: unknown) => `failed: ${String(error)}`,
+    );
+    // Y queues on X's union lock rather than acquiring one of the two rows and
+    // cycling. Tolerant of no waiter on purpose: a save that does not wait is
+    // the shape that could deadlock, and the assertions below are what catch
+    // it either way.
+    await settleForLockWaiter(pool);
+    release();
+
+    expect(await savingX).toBe('committed');
+    expect(await savingY).toBe('committed');
+    const rows = await pool.query<{ stage_id: string; asset_id: string }>(
+      'SELECT stage_id, asset_id FROM document_asset_refs ORDER BY stage_id, asset_id',
+    );
+    expect(rows.rows).toEqual([
+      { stage_id: 'cross-x', asset_id: 'cross-a' },
+      { stage_id: 'cross-y', asset_id: 'cross-z' },
+    ]);
+    expect(ids).toHaveLength(2);
+  });
+
+  test('the legacy mark and a multi-scope save do not deadlock each other', async () => {
+    // The other half of P2, and the one the reviewer reproduced: the mark
+    // locks its batch ascending with FOR UPDATE, which conflicts with the
+    // KEY SHARE a reference INSERT takes. While the save took those per scope,
+    // a save whose first scope named the higher id could hold what the mark
+    // wanted while waiting for what the mark held.
+    for (const name of ['mark-a', 'mark-z']) {
+      const minted = await assets.put(principal, new Blob([`bytes ${name}`]));
+      await pool.query(
+        `UPDATE asset_entries
+            SET id = $2, committed_at = NULL, expires_at = NULL, unreferenced_at = NULL
+          WHERE id = $1`,
+        [minted, name],
+      );
+    }
+    await documents.declareAssetReferenceTracking();
+
+    let reachedInsert!: () => void;
+    const atInsert = new Promise<void>((resolve) => {
+      reachedInsert = resolve;
+    });
+    let release!: () => void;
+    const mayProceed = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let paused = false;
+    const pausingAfterFirstInsert: WithTransaction = async (body) =>
+      transactionFor(pool)((queryable) =>
+        body({
+          async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+            text: string,
+            params?: unknown[],
+          ): Promise<QueryResult<TRow>> {
+            const answer = await queryable.query<TRow>(text, params);
+            if (!paused && text.includes('INSERT INTO document_asset_refs')) {
+              paused = true;
+              reachedInsert();
+              await mayProceed;
+            }
+            return answer;
+          },
+        }),
+      );
+
+    const saving = pausingAfterFirstInsert((queryable) =>
+      syncStageAssetReferences(queryable, {
+        stageId: 'mark-stage',
+        scopes: [
+          // Higher id first: the order the per-scope inserts used to follow.
+          { scope: 'stage', sceneId: '', candidates: ['mark-z'] },
+          { scope: 'scene', sceneId: 'mark-scene', candidates: ['mark-a'] },
+        ],
+      }),
+    ).then(
+      () => 'committed',
+      (error: unknown) => `failed: ${String(error)}`,
+    );
+    await atInsert;
+
+    const marking = new AssetCollector(pool as Queryable, bytes, {
+      withTransaction: transactionFor(pool),
+      documentReferences: true,
+      graceMs: 60 * 60 * 1000,
+    })
+      .collectPass()
+      .then(
+        (pass) => `resolved ${pass.legacyEntriesCommitted}`,
+        (error: unknown) => `failed: ${String(error)}`,
+      );
+    await settleForLockWaiter(pool);
+    release();
+
+    expect(await saving).toBe('committed');
+    // The mark queued behind the save and then found both rows committed by
+    // it, which the predicate re-check under the lock drops from the batch --
+    // so it marks nothing and, crucially, is not aborted.
+    expect(await marking).toBe('resolved 0');
+    const rows = await pool.query<{ id: string; committed: boolean }>(
+      `SELECT id, committed_at IS NOT NULL AS committed FROM asset_entries ORDER BY id`,
+    );
+    expect(rows.rows).toEqual([
+      { id: 'mark-a', committed: true },
+      { id: 'mark-z', committed: true },
+    ]);
+  });
+
+  test('two saves sharing asset ids both complete', async () => {
+    // Two documents of one principal naming the same assets -- a slide copied
+    // between courses -- saved at the same time. Each locks the entry rows it
+    // commits; unordered, the two can hold what the other wants, and the
+    // deadlock victim's save is aborted. Ordered, they queue.
+    const shared: string[] = [];
+    for (const index of [0, 1, 2, 3]) {
+      shared.push(await assets.put(principal, new Blob([`shared save ${index}`])));
+    }
+    const namingAll = (stageId: string, refs: string[]): MaicDocument =>
+      ({
+        stage: { id: stageId, name: 'Shared Course', createdAt: 1000, updatedAt: 2000 },
+        scenes: [
+          {
+            id: `${stageId}-scene`,
+            stageId,
+            title: `${stageId}-scene`,
+            order: 0,
+            type: 'slide',
+            content: {
+              type: 'slide',
+              canvas: {
+                id: `canvas-${stageId}`,
+                elements: refs.map((src) => ({ type: 'image', src })),
+              },
+            },
+          },
+        ],
+      }) as unknown as MaicDocument;
+
+    // Opposite document orders, so nothing but the sort decides the lock order.
+    const results = await Promise.allSettled([
+      documents.saveDocument(namingAll('share-a', shared)),
+      documents.saveDocument(namingAll('share-b', [...shared].reverse())),
+    ]);
+
+    expect(results.map((result) => result.status)).toEqual(['fulfilled', 'fulfilled']);
+    const rows = await pool.query<{ asset_id: string }>(
+      'SELECT DISTINCT asset_id FROM document_asset_refs ORDER BY asset_id',
+    );
+    expect(rows.rows.map((row) => row.asset_id)).toEqual([...shared].sort());
   });
 
   test('a backfill that cannot lock its document reports both the contention and the document', async () => {

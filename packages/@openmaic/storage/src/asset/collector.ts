@@ -5,6 +5,7 @@ import {
   assetReferenceTrackingEnabled,
   backfillDocumentAssetReferences,
   documentAssetReferencesWithdrawn,
+  lockBackfillEntries,
   sceneAssetScope,
   stageAssetScope,
 } from './references.js';
@@ -268,6 +269,37 @@ function collectorConfigurationFailure(): Error {
 }
 
 /**
+ * An error a pass raised while it was already holding an entry-level failure.
+ *
+ * `collectPass` runs the entry level first and the blob pass second, and the
+ * blob pass is allowed to fail on its own. When both fail, the blob failure is
+ * the one thrown -- it is what stopped the pass -- and the entry-level failure
+ * would otherwise be lost, so it is attached here instead. Declared as an
+ * interface so reading it is a type rather than a cast, exactly as `stageId`
+ * is on {@link AssetCollectionFailure}; the property is non-enumerable, so it
+ * does not change how an error already logged or serialized prints.
+ */
+export interface AssetCollectionEntryLevelFailure {
+  /** The entry-level failure this pass had recorded before the raised one. */
+  readonly entryLevelFailure?: unknown;
+}
+
+/** Attach a recorded entry-level failure to the error about to be thrown. */
+function carryingEntryFailure(
+  error: unknown,
+  pending: { readonly error: unknown } | undefined,
+): unknown {
+  if (pending === undefined || !(error instanceof Error) || error === pending.error) return error;
+  Object.defineProperty(error, 'entryLevelFailure', {
+    value: pending.error,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+  return error;
+}
+
+/**
  * Re-runnable collector for the rows left behind by request operations.
  *
  * This is the only component that calls `AssetByteStore.delete`, and -- with
@@ -317,6 +349,16 @@ export class AssetCollector {
    * released an entry the documents it had not reached still reference.
    */
   private backfillCursor: string | null = null;
+  /**
+   * Where {@link stampUnreferencedSweep} has got to, as the id of the last
+   * entry it considered; `null` means "start from the beginning".
+   *
+   * In memory and therefore per collector instance, like
+   * {@link backfillCursor}, and for a weaker reason: the sweep is idempotent
+   * and unordered work, so a process that restarts mid-walk simply starts the
+   * walk again and reaches the same rows. Nothing depends on where it was.
+   */
+  private stampSweepCursor: string | null = null;
 
   constructor(
     private readonly queryable: Queryable,
@@ -393,21 +435,51 @@ export class AssetCollector {
     // unreferenced, and doing it before the blob pass means a blob freed here
     // starts its own grace period now instead of one interval from now.
     //
-    // The tracking marker is checked before any of it. A missing marker is a
-    // misconfiguration whose consequence is deleting live media, so the pass
-    // refuses -- but only the ENTRY level refuses. The blob pass below is
-    // correct with or without a reference writer and still runs, so a
-    // deployment that trips this does not also stop reclaiming bytes; the
-    // refusal is raised after it.
+    // NOTHING the entry level does can stop the blob pass, and that is the
+    // whole shape of the block below. The blob pass is correct with or without
+    // a reference writer and with or without a working entry level -- it reads
+    // `asset_blobs` and asks only whether any entry still names those bytes --
+    // so a deployment whose entry level is misconfigured or contended keeps
+    // reclaiming bytes rather than stopping at both levels at once. Two things
+    // can go wrong here, and BOTH are recorded rather than thrown:
+    //
+    // - A missing tracking marker, which is a misconfiguration whose
+    //   consequence would be deleting live media, so the entry level refuses.
+    // - Any throw out of the entry level itself: a lock timeout on the legacy
+    //   mark, a backfill that cannot read its document, a release that lost a
+    //   race with the request path. These are transient by nature, and letting
+    //   one of them cost the deployment its byte reclamation for that interval
+    //   would be a strictly worse answer than reporting it after the fact.
+    //
+    // The two are exclusive -- the refusal is the else branch of the check
+    // whose then branch is the only thing that can fail -- but the order they
+    // are raised in is still explicit, so an edit that makes both reachable
+    // raises the misconfiguration rather than silently dropping either.
+    //
+    // PRECEDENCE, when the blob pass ALSO fails: the blob failure is what is
+    // thrown, because it is the failure that stopped this pass, and the
+    // recorded entry-level failure travels on it as `entryLevelFailure` (see
+    // AssetCollectionEntryLevelFailure) rather than being dropped. Otherwise
+    // the recorded failure is thrown at the end, once the blob pass is done.
     let trackingFailure: AssetReferenceTrackingNotEnabledError | undefined;
+    // Wrapped rather than held bare, so "there was a failure" cannot be
+    // confused with a falsy thrown value.
+    let entryFailure: { readonly error: unknown } | undefined;
     let entries = EMPTY_ENTRY_LEVEL;
     if (this.documentReferences) {
-      if (await this.referenceTrackingEnabled()) {
-        entries = await this.entryLevelPass(now, cutoff);
-      } else {
-        trackingFailure = new AssetReferenceTrackingNotEnabledError();
+      try {
+        if (await this.referenceTrackingEnabled()) {
+          entries = await this.entryLevelPass(now, cutoff);
+        } else {
+          trackingFailure = new AssetReferenceTrackingNotEnabledError();
+        }
+      } catch (error) {
+        entryFailure = { error };
       }
     }
+    // Whichever of the two was recorded; they are exclusive.
+    const pendingEntryLevelFailure =
+      trackingFailure === undefined ? entryFailure : { error: trackingFailure };
     let candidates;
     try {
       candidates = await this.queryable.query<CandidateRow>(
@@ -430,7 +502,7 @@ export class AssetCollector {
         [cutoff, this.batchSize],
       );
     } catch (error) {
-      throw collectorFailure(undefined, error);
+      throw carryingEntryFailure(collectorFailure(undefined, error), pendingEntryLevelFailure);
     }
 
     let collected = 0;
@@ -465,10 +537,11 @@ export class AssetCollector {
         });
         if (didCollect) collected += 1;
       } catch (error) {
-        throw collectorFailure(undefined, error);
+        throw carryingEntryFailure(collectorFailure(undefined, error), pendingEntryLevelFailure);
       }
     }
     if (trackingFailure) throw trackingFailure;
+    if (entryFailure) throw entryFailure.error;
     return {
       collected,
       capped: candidates.rows.length >= this.batchSize,
@@ -506,6 +579,18 @@ export class AssetCollector {
    *       after the grace period rather than on the same pass -- which leaves
    *       a window for a document write, an undo or a restore to claim it
    *       back.
+   *
+   * The mark is itself batched (see {@link markLegacyEntries}), and that
+   * cannot weaken any of the three. Each batch marks and stamps the same rows
+   * in one transaction, so (iii) holds per batch rather than only at the end,
+   * and a batch that fails leaves its rows legacy -- which keeps (i)'s gate
+   * shut, because the gate is re-asked of the database on this pass and every
+   * later one. The gate opens only once NO legacy row is left, which is after
+   * the last batch has both marked and stamped; there is no window in which
+   * the gate is open over a row that is committed but not yet considered for a
+   * stamp, and even if there were, such a row is not a release candidate --
+   * `releaseEntries` takes only entries with `expires_at` or `unreferenced_at`
+   * set.
    */
   private async entryLevelPass(now: string, cutoff: string): Promise<EntryLevelPass> {
     let backfilledDocuments = 0;
@@ -531,8 +616,131 @@ export class AssetCollector {
         legacyEntriesCommitted,
       };
     }
+    // The gate is open, so a missing reference row now means what it says.
+    // One bounded batch of the sweep, then the release.
+    await this.stampUnreferencedSweep();
     const released = await this.releaseEntries(now, cutoff);
     return { ...released, backfilledDocuments, legacyEntriesCommitted };
+  }
+
+  /**
+   * Stamp one bounded batch of committed entries that no document references.
+   *
+   * This is the standing counterpart of the legacy mark's per-batch stamp, and
+   * it exists because that one cannot reach every row that needs stamping.
+   * The document store stamps an entry the moment a write drops its last
+   * reference, which covers everything that happens through a write. What it
+   * cannot cover is a reference row that went missing WITHOUT such a write:
+   * rows removed out of band, or a restore that reinstated documents but not
+   * the reference table. Such an entry is committed, unstamped and referenced
+   * by nothing, and nothing else in the system would ever look at it again --
+   * `releaseEntries` takes only entries with `expires_at` or `unreferenced_at`
+   * set, and the blob pass refuses a blob any entry still names. The entry,
+   * its bytes and its share of the principal's quota would be held forever.
+   *
+   * NOT a repair for a mixed tracking state, which is the opposite shape and
+   * is worth naming so this is not read as covering it. A `deleteDocument`
+   * issued by a store with `trackAssetReferences` off deletes the document
+   * rows and nothing else -- `document_asset_refs` has no foreign key to
+   * `document_stages` -- so that document's reference rows OUTLIVE it. The
+   * entry stays referenced, by rows naming a stage that is gone, which is the
+   * state this sweep skips by design and nothing in this package reclaims.
+   * `docs/reference-server.md` says why the answer is to roll
+   * `trackAssetReferences` and `documentReferences` back together rather than
+   * to have the collector guess.
+   *
+   * Gated on the legacy gate being open, which is invariant (i) again rather
+   * than caution: while the walk is unfinished the reference table is a subset
+   * of the truth, so "no reference row" does not yet mean "no document names
+   * it", and stamping on that basis would start a grace period for media a
+   * document still holds.
+   *
+   * ONE batch per pass, `batchSize` rows, paged by an ascending id cursor that
+   * wraps to the start when it reaches the end. The cursor lives in memory,
+   * like {@link backfillCursor}: a restart re-walks from the start, which is
+   * free because the work is idempotent -- a row already stamped no longer
+   * matches the predicate, and a row that gained a reference is skipped by the
+   * `NOT EXISTS`. The cost is the honest one: every pass locks one bounded,
+   * ascending batch of LIVE entry rows for the length of one short
+   * transaction, so a concurrent save touching one of them queues behind it,
+   * bounded by that transaction rather than by the table. An orphan therefore
+   * becomes a release candidate within `ceil(entries / batchSize)` passes
+   * rather than never.
+   *
+   * The two statements are the same discipline as everywhere else in this
+   * file: lock the batch ascending with `FOR UPDATE` (the strength that
+   * conflicts with an insert-only reference writer's `KEY SHARE`), then stamp
+   * in a separate statement whose fresh READ COMMITTED snapshot sees any
+   * reference row that committed while the lock was being waited for.
+   */
+  private async stampUnreferencedSweep(): Promise<void> {
+    const candidates = await this.sweepCandidates();
+    if (candidates.length === 0) {
+      // The end of the table. Wrap, so the next pass starts over and an entry
+      // orphaned behind the cursor is reached.
+      this.stampSweepCursor = null;
+      return;
+    }
+    this.stampSweepCursor = candidates[candidates.length - 1] ?? null;
+    try {
+      await this.lockBoundedTransaction(async (queryable) => {
+        const locked = await queryable.query<EntryCandidateRow>(
+          `SELECT id
+             FROM asset_entries
+            WHERE id = ANY($1::text[])
+              AND committed_at IS NOT NULL AND unreferenced_at IS NULL
+            ORDER BY id ASC
+              FOR UPDATE`,
+          [candidates],
+        );
+        const ids = locked.rows.map((row) => row.id);
+        if (ids.length === 0) return;
+        await queryable.query(
+          `UPDATE asset_entries AS entries
+              SET unreferenced_at = now()
+            WHERE entries.id = ANY($1::text[])
+              AND entries.unreferenced_at IS NULL
+              AND NOT EXISTS (
+                    SELECT 1 FROM document_asset_refs AS refs WHERE refs.asset_id = entries.id
+                  )`,
+          [ids],
+        );
+      });
+    } catch (error) {
+      throw collectorFailure(undefined, error);
+    }
+  }
+
+  /**
+   * The next page of the sweep, read without a lock.
+   *
+   * Unlike {@link legacyCandidates} this one needs a cursor, because a row it
+   * visits usually still matches the predicate afterwards -- a referenced
+   * entry is left alone and would otherwise be offered again forever, and the
+   * sweep would never reach the row behind it.
+   */
+  private async sweepCandidates(): Promise<string[]> {
+    const cursor = this.stampSweepCursor;
+    try {
+      const page = await this.queryable.query<EntryCandidateRow>(
+        cursor === null
+          ? `SELECT id
+               FROM asset_entries
+              WHERE committed_at IS NOT NULL AND unreferenced_at IS NULL
+              ORDER BY id ASC
+              LIMIT $1`
+          : `SELECT id
+               FROM asset_entries
+              WHERE committed_at IS NOT NULL AND unreferenced_at IS NULL
+                AND id > $2
+              ORDER BY id ASC
+              LIMIT $1`,
+        cursor === null ? [this.batchSize] : [this.batchSize, cursor],
+      );
+      return page.rows.map((row) => row.id);
+    } catch (error) {
+      throw collectorFailure(undefined, error);
+    }
   }
 
   private async hasLegacyEntries(): Promise<boolean> {
@@ -619,15 +827,24 @@ export class AssetCollector {
             'SELECT stage_id, id, data FROM document_scenes WHERE stage_id = $1',
             [stageId],
           );
-          await backfillDocumentAssetReferences(queryable, {
-            stageId,
-            scope: stageAssetScope(stageRow.data),
-          });
-          for (const scene of scenes.rows) {
-            await backfillDocumentAssetReferences(queryable, {
-              stageId,
-              scope: sceneAssetScope(scene.id, scene.data),
-            });
+          const scopes = [
+            stageAssetScope(stageRow.data),
+            ...scenes.rows.map((scene) => sceneAssetScope(scene.id, scene.data)),
+          ];
+          // Every entry this document's inserts will touch, locked ascending
+          // in ONE statement first. Each per-scope insert makes the reference
+          // table's foreign key take `KEY SHARE` on the entries it names, so
+          // without this the walk acquired entry locks in scope order -- as
+          // many sequences as the document has scopes -- and could deadlock
+          // the ascending mark of a collector on another instance. `KEY SHARE`
+          // is exactly what those inserts take, so this adds no conflict; it
+          // only fixes when and in what order they are taken.
+          await lockBackfillEntries(
+            queryable,
+            scopes.flatMap((scope) => [...scope.candidates]),
+          );
+          for (const scope of scopes) {
+            await backfillDocumentAssetReferences(queryable, { stageId, scope });
           }
         });
       } catch (error) {
@@ -644,84 +861,181 @@ export class AssetCollector {
   }
 
   /**
-   * Mark every legacy entry committed, then stamp the marked ones no document
-   * names.
+   * Mark the legacy entries committed, then stamp the marked ones no document
+   * names -- in bounded batches, never in one transaction over the table.
    *
-   * THREE statements, and the shape is the same discipline `releaseEntries`
-   * uses, for the same reason.
+   * ## Why batches
    *
-   * (1) Mark. Separate from the stamp rather than one data-modifying CTE:
-   *     PostgreSQL does not support updating the same row twice in one
-   *     statement, and every row this marks is a row the stamp may touch.
+   * The unbatched form locked every legacy row and then every committed,
+   * unstamped row -- that is every healthy entry on the deployment -- in one
+   * transaction, and held those locks for as long as the slowest of them took
+   * to acquire. Two consequences, both real on a busy deployment and both in
+   * the upgrade window rather than in steady state:
    *
-   * (2) Lock the stamping candidates with `FOR UPDATE`. An `UPDATE` takes
-   *     `FOR NO KEY UPDATE`, which does NOT conflict with the `KEY SHARE` an
-   *     insert into `document_asset_refs` takes on the entry it names -- so an
-   *     `UPDATE … WHERE NOT EXISTS (refs)` neither waits for a concurrent
-   *     insert-only reference writer nor sees it, and would stamp an entry a
-   *     backfill on another instance had just given a reference. That is not a
-   *     loss (`releaseEntries` re-checks references before deleting anything),
-   *     but it under-counts the principal's live bytes and starts a grace
-   *     period that should not have started. `FOR UPDATE` does conflict with
-   *     `KEY SHARE`, so this waits.
+   * - Every document write touching an existing entry queued behind it, up to
+   *   the `lock_timeout` budget, and a user save that hit the budget failed
+   *   with a lock-timeout error the app's HTTP layer does not retry.
+   * - The mark held rows it had already locked while it waited for the next,
+   *   so it could take part in a lock cycle with a concurrent save's
+   *   `commitReferencedEntries` and be chosen, or make the save be chosen, as
+   *   the deadlock victim.
    *
-   * (3) Stamp, restricted to the ids just locked. A separate statement takes a
-   *     fresh snapshot under READ COMMITTED, so it sees any reference row that
-   *     committed while (2) was waiting, and the locks held since (2) keep a
-   *     later one from arriving.
+   * A batch takes at most `batchSize` row locks, in ascending id order, and
+   * commits. A concurrent save can still contend for the rows of the batch in
+   * flight, and either side may still hit `lock_timeout` -- what changes is
+   * that the wait is bounded by one batch rather than by the whole table, and
+   * that a batch which fails costs only itself.
    *
-   * The stamp's predicate is "committed, unreferenced_at NULL, and no
-   * reference row", which is deliberately broader than "was legacy a moment
-   * ago": the document store stamps an entry the moment it loses its last
-   * reference, so the only other rows this can reach are ones whose reference
-   * rows went missing out of band -- which genuinely are unreferenced, and
-   * which the grace period protects exactly as it protects the rest.
+   * ## Why one transaction per batch marks AND stamps
    *
-   * The candidate ids are materialized, which this one pass can afford: it
-   * runs once per deployment, over a backlog it is already walking document by
-   * document, and the alternative -- repeating the predicate in (3) instead of
-   * naming the locked rows -- would leave any row that became committed after
-   * (2)'s snapshot unlocked and back in the stale window.
+   * Because that is what makes the work resumable from the DATABASE rather
+   * than from memory. A row this transaction does not reach stays legacy, so
+   * invariant (i) keeps the gate shut, `hasLegacyEntries` still says so on the
+   * next pass, and the walk-then-mark runs again and continues where the
+   * failure left it. Nothing is remembered between passes and nothing is
+   * undone: what a batch marked stays marked, and what it stamped stays
+   * stamped, so a lock timeout can never leave the legacy gate closed forever
+   * or lose a stamp.
+   *
+   * Marking and stamping in two separate walks was the other candidate. It
+   * fails exactly there: once the marking walk finished, the last legacy row
+   * would be gone and with it the only durable record that the stamping walk
+   * still had rows to visit, so a stamping walk interrupted half way would
+   * simply never resume, and the entries it had not reached -- committed,
+   * referenced by nothing, never stamped -- would never become release
+   * candidates at all.
+   *
+   * ## The three statements per batch
+   *
+   * (1) Lock this batch's ids with `FOR UPDATE`, ascending, re-checking the
+   *     legacy predicate. `FOR UPDATE` rather than the `FOR NO KEY UPDATE` an
+   *     `UPDATE` takes by itself, because only `FOR UPDATE` conflicts with the
+   *     `KEY SHARE` an insert into `document_asset_refs` takes on the entry it
+   *     names: an `UPDATE … WHERE NOT EXISTS (refs)` would neither wait for a
+   *     concurrent insert-only reference writer nor see it, and would stamp an
+   *     entry a backfill on another instance had just given a reference. That
+   *     is not a loss (`releaseEntries` re-checks references before deleting
+   *     anything), but it under-counts the principal's live bytes and starts a
+   *     grace period that should not have started.
+   *
+   *     Ascending order is what makes a concurrent writer QUEUE rather than
+   *     deadlock, and that only holds because every other writer in this
+   *     package acquires the entries of one transaction in one ascending
+   *     statement too: a document write through `references.ts` takes the
+   *     union of the ids it will reference and the ids it will stop
+   *     referencing up front (`lockEntriesInOrder`), and the backfill takes
+   *     the union of one document's ids at `FOR KEY SHARE`
+   *     (`lockBackfillEntries`) before its per-scope inserts. Ordering one
+   *     side alone would not have been enough, and was not: while a save still
+   *     took its foreign-key `KEY SHARE` locks one scope at a time, a save
+   *     whose first scope named a higher id than its second could hold what
+   *     this batch wanted and then wait for what this batch held. The residual
+   *     is now a writer outside this discipline -- anything that locks several
+   *     `asset_entries` rows in more than one statement, or in another order.
+   *
+   *     Re-checking the predicate under the lock is what keeps a row a
+   *     concurrent save committed between the candidate query and the lock out
+   *     of the batch entirely: such a row is referenced by that save, so it
+   *     must be neither counted nor stamped here.
+   *
+   * (2) Mark the locked ids committed. Separate from the stamp rather than one
+   *     data-modifying CTE: PostgreSQL does not support updating the same row
+   *     twice in one statement, and every row this marks is a row the stamp
+   *     may touch.
+   *
+   * (3) Stamp, restricted to the ids just locked and to the ones no document
+   *     references. A separate statement takes a fresh snapshot under READ
+   *     COMMITTED, so it sees any reference row that committed while (1) was
+   *     waiting, and the locks held since (1) keep a later one from arriving.
+   *
+   * The stamp here reaches exactly the rows this batch marked, which is
+   * narrower than the predicate the unbatched form used ("every committed,
+   * unstamped, unreferenced entry"). The rest of that breadth has NOT been
+   * dropped -- it moved to {@link stampUnreferencedSweep}, which runs on every
+   * pass instead of only on the one that finishes the walk. It had to move
+   * rather than stay here: a row this predicate cannot match is a row no
+   * number of later passes would reach, because once the last legacy row is
+   * marked this function is never called again.
+   *
+   * ## Termination
+   *
+   * The loop runs until no legacy candidate is left, rather than stopping
+   * after a fixed number of batches and reporting a cap. Stopping early would
+   * leave legacy rows behind, and invariant (i) would then hold the entry
+   * level shut for another whole interval -- which is the deferral this
+   * rework exists to prevent -- while making the next pass repeat the document
+   * walk before it could continue. It terminates because nothing creates
+   * legacy rows: `PgAssetStore.put` writes all three lifecycle columns, so the
+   * candidate set only shrinks, by this loop or by a concurrent save that
+   * commits one of them.
    */
   private async markLegacyEntries(): Promise<number> {
+    let marked = 0;
+    for (;;) {
+      const candidates = await this.legacyCandidates();
+      if (candidates.length === 0) return marked;
+      marked += await this.markLegacyBatch(candidates);
+    }
+  }
+
+  /**
+   * The next batch of legacy ids, read without a lock.
+   *
+   * No cursor: the rows this returns are the ones the batch below removes from
+   * the predicate, so the next call starts where this one stopped without
+   * having to remember anything, and a row a concurrent writer un-legacies is
+   * simply not offered again. `asset_entries_legacy_idx` is the partial index
+   * on exactly this predicate, so each call is a short read off its front
+   * rather than a scan of the table.
+   */
+  private async legacyCandidates(): Promise<string[]> {
+    try {
+      const page = await this.queryable.query<EntryCandidateRow>(
+        `SELECT id
+           FROM asset_entries
+          WHERE committed_at IS NULL AND expires_at IS NULL
+          ORDER BY id ASC
+          LIMIT $1`,
+        [this.batchSize],
+      );
+      return page.rows.map((row) => row.id);
+    } catch (error) {
+      throw collectorFailure(undefined, error);
+    }
+  }
+
+  /** One bounded lock-mark-stamp transaction; see {@link markLegacyEntries}. */
+  private async markLegacyBatch(candidates: readonly string[]): Promise<number> {
     try {
       return await this.lockBoundedTransaction(async (queryable) => {
-        const marked = await queryable.query<{ marked: string }>(
-          // Counted through a data-modifying CTE rather than by returning
-          // every id: this runs once over a whole deployment's backlog, and
-          // the count is all the caller reports.
-          `WITH marked AS (
-             UPDATE asset_entries
-                SET committed_at = now()
-              WHERE committed_at IS NULL AND expires_at IS NULL
-             RETURNING 1
-           )
-           SELECT count(*)::text AS marked FROM marked`,
-        );
         const locked = await queryable.query<EntryCandidateRow>(
-          // Ordered so two collectors racing this statement queue in the same
-          // direction. Nothing else is held while it waits, and the entry pass
-          // locks one row at a time, so no cycle is possible either way.
           `SELECT id
              FROM asset_entries
-            WHERE committed_at IS NOT NULL AND unreferenced_at IS NULL
+            WHERE id = ANY($1::text[])
+              AND committed_at IS NULL AND expires_at IS NULL
             ORDER BY id ASC
               FOR UPDATE`,
+          [candidates],
         );
-        const candidates = locked.rows.map((row) => row.id);
-        if (candidates.length > 0) {
-          await queryable.query(
-            `UPDATE asset_entries AS entries
-                SET unreferenced_at = now()
-              WHERE entries.id = ANY($1::text[])
-                AND entries.unreferenced_at IS NULL
-                AND NOT EXISTS (
-                      SELECT 1 FROM document_asset_refs AS refs WHERE refs.asset_id = entries.id
-                    )`,
-            [candidates],
-          );
-        }
-        return Number(marked.rows[0]?.marked ?? 0);
+        const ids = locked.rows.map((row) => row.id);
+        if (ids.length === 0) return 0;
+        await queryable.query(
+          `UPDATE asset_entries
+              SET committed_at = now()
+            WHERE id = ANY($1::text[])`,
+          [ids],
+        );
+        await queryable.query(
+          `UPDATE asset_entries AS entries
+              SET unreferenced_at = now()
+            WHERE entries.id = ANY($1::text[])
+              AND entries.unreferenced_at IS NULL
+              AND NOT EXISTS (
+                    SELECT 1 FROM document_asset_refs AS refs WHERE refs.asset_id = entries.id
+                  )`,
+          [ids],
+        );
+        return ids.length;
       });
     } catch (error) {
       throw collectorFailure(undefined, error);
