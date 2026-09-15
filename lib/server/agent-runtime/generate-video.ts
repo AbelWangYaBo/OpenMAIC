@@ -1,8 +1,5 @@
-import { createHash } from 'node:crypto';
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
-
 import type { AgentTool } from '@earendil-works/pi-agent-core';
+import type { AssetStore } from '@openmaic/storage';
 import { nanoid } from 'nanoid';
 import { Type, type Static } from 'typebox';
 
@@ -24,8 +21,17 @@ import {
 import { createLogger } from '@/lib/logger';
 import { recordGenerationUsage } from '@/lib/server/usage-storage';
 import { validateUrlForSSRF } from '@/lib/server/ssrf-guard';
-import { readResponseBodyWithLimit } from '@/lib/server/bounded-download';
-import { CLASSROOMS_DIR } from '@/lib/server/classroom-storage';
+import {
+  DownloadByteBudget,
+  MAX_REMOTE_IMAGE_BATCH_BYTES,
+  MAX_REMOTE_IMAGE_BYTES,
+  readResponseBodyWithLimit,
+} from '@/lib/server/bounded-download';
+import { mayNameAPoolAsset } from '@/lib/media/media-placeholder';
+import {
+  AssetStorageFullError,
+  storeGeneratedAssetOrThrow,
+} from '@/lib/server/store-generated-asset';
 import {
   HOST_AGENT_LIFECYCLE as LIFECYCLE,
   type MediaReadyLifecycleData,
@@ -91,11 +97,32 @@ interface PersistVideoInput {
 }
 
 interface PersistedVideo {
+  /** The allocated asset id for the video bytes. */
   src: string;
   mime: string;
+  /**
+   * The allocated asset id for the provider's poster image, when it offered
+   * one and storing it succeeded. Absent otherwise: a poster is an
+   * optimization, and losing it must never cost the video.
+   */
+  poster?: string;
 }
 
 type PersistGeneratedVideo = (input: PersistVideoInput) => Promise<PersistedVideo>;
+
+/** The stored ids the completion patch writes onto the element. */
+type PersistedMedia = Pick<PersistedVideo, 'src' | 'poster'>;
+
+/**
+ * Whether a document value is an id the asset pool allocated.
+ *
+ * A plain boolean rather than the imported type predicate: narrowing a value
+ * already known to be a string to `string` leaves `never` on the other branch,
+ * and the checks after this one still have work to do on it.
+ */
+function isAllocatedAssetId(value: string): boolean {
+  return mayNameAPoolAsset(value);
+}
 
 export interface GenerateVideoToolDeps extends Pick<CourseToolDeps, 'sessionId' | 'abortSignal'> {
   /**
@@ -122,12 +149,6 @@ export interface GenerateVideoToolDeps extends Pick<CourseToolDeps, 'sessionId' 
   timeoutMs?: number;
 }
 
-function extensionForVideoMime(mime: string): string {
-  if (mime === 'video/webm') return 'webm';
-  if (mime === 'video/quicktime') return 'mov';
-  return 'mp4';
-}
-
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error('aborted');
 }
@@ -147,7 +168,8 @@ async function awaitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Pro
   });
 }
 
-async function fetchGeneratedVideo(url: string, signal: AbortSignal): Promise<Response> {
+/** SSRF-guarded, redirect-following fetch for a provider's video or poster. */
+async function fetchGeneratedMedia(url: string, signal: AbortSignal): Promise<Response> {
   const maxRedirects = 5;
   let currentUrl = url;
   for (let hop = 0; ; hop++) {
@@ -167,18 +189,67 @@ async function fetchGeneratedVideo(url: string, signal: AbortSignal): Promise<Re
 }
 
 /**
- * Video providers return hosted URLs that may expire. Materialize those bytes
- * through the same local classroom-media path as generate_image and classic
- * mode, returning an origin-independent RELATIVE serving path: the agent
- * runtime has no request to derive an origin from, and the durable value must
- * stay valid regardless of the origin the app is served from (the browser
- * resolves the relative path against the page origin).
+ * Download the provider's poster and store it, or give up on it.
+ *
+ * A poster is a convenience the provider may or may not offer, so every
+ * failure here — a bad URL, a download error, a full store — costs the poster
+ * and nothing else. The video is the deliverable, and it is already stored by
+ * the time this runs.
  */
-export async function defaultPersistGeneratedVideo({
-  result,
-  stageId,
-  signal,
-}: PersistVideoInput): Promise<PersistedVideo> {
+async function storeGeneratedPoster(
+  posterUrl: string,
+  stageId: string,
+  signal: AbortSignal,
+  assetStore?: AssetStore,
+): Promise<string | undefined> {
+  try {
+    const response = await fetchGeneratedMedia(posterUrl, signal);
+    if (!response.ok) throw new Error(`Generated poster download failed: HTTP ${response.status}`);
+    const mime = response.headers.get('content-type')?.split(';')[0]?.trim() || 'image/jpeg';
+    if (!mime.startsWith('image/')) {
+      throw new Error(`Generated poster download returned unexpected content type: ${mime}`);
+    }
+    // A poster is a still frame, so the image caps apply to it rather than the
+    // video's.
+    const bytes = await readResponseBodyWithLimit(response, {
+      maxBytes: MAX_REMOTE_IMAGE_BYTES,
+      aggregateBudget: new DownloadByteBudget(MAX_REMOTE_IMAGE_BATCH_BYTES),
+    });
+    throwIfAborted(signal);
+    return await storeGeneratedAssetOrThrow({
+      stageId,
+      bytes,
+      mimeType: mime,
+      kind: 'poster',
+      assetStore,
+    });
+  } catch (error) {
+    log.warn(
+      `Generated poster for stage ${stageId} was not stored: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return undefined;
+  }
+}
+
+/**
+ * Video providers return hosted URLs that may expire. Materialize those bytes
+ * into the asset pool and return the ids it allocated.
+ *
+ * `src` is an `ast_` id rather than a serving path. The completion patch names
+ * it (and the poster's id) on the video element, and that document write is
+ * what commits both allocations and records their references (#1473). A video
+ * the store has no room for fails the job: there is no local-disk fallback,
+ * because a fallback would restore the two-model situation this path removes.
+ *
+ * `assetStore` is a test seam — the historical shape of this function before
+ * #1242 replaced the pool with a local file.
+ */
+export async function defaultPersistGeneratedVideo(
+  { result, stageId, signal }: PersistVideoInput,
+  assetStore?: AssetStore,
+): Promise<PersistedVideo> {
   throwIfAborted(signal);
   let parsed: URL;
   try {
@@ -190,26 +261,29 @@ export async function defaultPersistGeneratedVideo({
     throw new Error(`Video provider returned an unsupported URL protocol: ${parsed.protocol}`);
   }
 
-  const response = await fetchGeneratedVideo(result.url, signal);
+  const response = await fetchGeneratedMedia(result.url, signal);
   if (!response.ok) throw new Error(`Generated video download failed: HTTP ${response.status}`);
   const mime = response.headers.get('content-type')?.split(';')[0]?.trim() || 'video/mp4';
   if (!mime.startsWith('video/')) {
     throw new Error(`Generated video download returned unexpected content type: ${mime}`);
   }
   const bytes = await readResponseBodyWithLimit(response, { maxBytes: MAX_GENERATED_VIDEO_BYTES });
-  const hash = createHash('sha256').update(bytes).digest('hex');
   throwIfAborted(signal);
 
-  const mediaDir = path.join(CLASSROOMS_DIR, stageId, 'media');
-  const filename = `generated-${hash}.${extensionForVideoMime(mime)}`;
-  await fs.mkdir(mediaDir, { recursive: true });
+  const src = await storeGeneratedAssetOrThrow({
+    stageId,
+    bytes,
+    mimeType: mime,
+    kind: 'video',
+    assetStore,
+  });
   throwIfAborted(signal);
-  await fs.writeFile(path.join(mediaDir, filename), bytes);
+
+  const poster = result.poster
+    ? await storeGeneratedPoster(result.poster, stageId, signal, assetStore)
+    : undefined;
   throwIfAborted(signal);
-  return {
-    src: `/api/classroom-media/${stageId}/media/${filename}`,
-    mime,
-  };
+  return { src, mime, ...(poster ? { poster } : {}) };
 }
 
 /**
@@ -295,10 +369,14 @@ async function emitMediaReadyFrame(
 }
 
 /**
- * Swap a video placeholder for the concrete persisted src on the stored
- * document: every slide video element whose `mediaRef` or `src` still equals
- * the placeholder gets the server-hosted src. Same mutation discipline as the
- * generation tools (`runStageMutation` + putScene). When no element
+ * Swap a video placeholder for the stored asset ids on the stored document:
+ * every slide video element whose `mediaRef` or `src` still equals the
+ * placeholder gets the allocated video id, and the poster id when there is
+ * one. This `putScene` is also the write that commits both allocations and
+ * records their rows in `document_asset_refs` — the store does that inside the
+ * write's own transaction, so there is no reference bookkeeping here. Same
+ * mutation discipline as the generation tools
+ * (`runStageMutation` + putScene). When no element
  * references the placeholder anymore — the agent or the user changed or
  * removed it meanwhile — the patch is skipped silently; the completion event
  * still carries the src.
@@ -313,7 +391,7 @@ export async function patchStageVideoPlaceholder(
   store: CourseStore,
   stageId: string,
   ref: string,
-  src: string,
+  media: PersistedMedia,
   signal?: AbortSignal,
 ): Promise<number> {
   const doc = await store.loadDocument(stageId);
@@ -321,13 +399,19 @@ export async function patchStageVideoPlaceholder(
   // A previously generated src of THIS stage (regeneration: the agent
   // re-pointed mediaRef at a new job while the element still carries the
   // last generated video, which would otherwise keep rendering it). Both
-  // the relative form this flow writes and the absolute form the classic
-  // pipeline persists are recognized; scoped to the stage's own media root
-  // so a user's pick copied from another stage is preserved.
+  // the relative form the legacy local-disk flow wrote and the absolute form
+  // the classic pipeline persists are recognized; scoped to the stage's own
+  // media root so a user's pick copied from another stage is preserved.
   const generatedPrefix = `/api/classroom-media/${stageId}/`;
   const isReplaceableSrc = (value: unknown): boolean => {
     if (value === undefined || value === '' || value === ref) return true;
     if (typeof value !== 'string') return false;
+    // An allocated id is what this flow writes now, and an id carries no stage
+    // in its shape, so the per-stage scoping above has nothing to read. What
+    // stands in for it is the binding: this element names THIS job through
+    // `mediaRef`, which is the agent re-pointing it at a new generation, and
+    // the previous generation's id is what it is replacing.
+    if (isAllocatedAssetId(value)) return true;
     if (value.startsWith(generatedPrefix)) return true;
     try {
       return new URL(value).pathname.startsWith(generatedPrefix);
@@ -351,7 +435,15 @@ export async function patchStageVideoPlaceholder(
         isReplaceableSrc(element.src)
       ) {
         touched = true;
-        return { ...element, src };
+        // Both ids land in the one write: `putScene` is what commits a
+        // freshly allocated entry, so a poster named by a second write would
+        // be a second chance to lose it. A poster the store refused is absent
+        // here, and an element's own poster is left alone rather than cleared.
+        return {
+          ...element,
+          src: media.src,
+          ...(media.poster ? { poster: media.poster } : {}),
+        };
       }
       return element;
     });
@@ -428,7 +520,7 @@ async function runVideoGenerationJob(input: VideoJobInput): Promise<void> {
           deps.backgroundStore,
           stageId,
           ref,
-          stored.src,
+          { src: stored.src, ...(stored.poster ? { poster: stored.poster } : {}) },
           AbortSignal.timeout(GENERATE_VIDEO_PATCH_TIMEOUT_MS),
         );
         if (patched > 0) {
@@ -449,11 +541,23 @@ async function runVideoGenerationJob(input: VideoJobInput): Promise<void> {
       ...(result.duration ? { durationSec: result.duration } : {}),
     });
   } catch (error) {
-    const reason = isTimeout(signal)
-      ? MEDIA_TOOL_ERROR_REASONS.timeout
-      : MEDIA_TOOL_ERROR_REASONS.generationFailed;
+    // A full store is its own outcome, not a provider failure: nothing was
+    // written, the document was not patched, and the condition is one an
+    // operator clears rather than one a retry outlasts. The code is the same
+    // one the browser's media-failure table already understands, so the
+    // workbench says why instead of showing a generic failure.
+    const reason =
+      error instanceof AssetStorageFullError
+        ? MEDIA_TOOL_ERROR_REASONS.storageFull
+        : isTimeout(signal)
+          ? MEDIA_TOOL_ERROR_REASONS.timeout
+          : MEDIA_TOOL_ERROR_REASONS.generationFailed;
     const message = error instanceof Error ? error.message : String(error);
-    if (reason === MEDIA_TOOL_ERROR_REASONS.timeout) {
+    if (reason === MEDIA_TOOL_ERROR_REASONS.storageFull) {
+      log.warn(
+        `[${toolCallId}] Video generation refused: the asset store is full, ${ref} was not stored`,
+      );
+    } else if (reason === MEDIA_TOOL_ERROR_REASONS.timeout) {
       log.warn(
         `[${toolCallId}] Video generation timed out: provider=${input.providerId}, model=${input.model ?? 'default'}, timeoutMs=${input.timeoutMs}`,
       );

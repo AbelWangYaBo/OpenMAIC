@@ -8,9 +8,15 @@
  * generation store keyed by the placeholder ref, so `lookupMediaTask` /
  * `resolveVideoMediaForElement` (lib/media/media-task-resolution.ts) resolve
  * the element still carrying the placeholder and its skeleton transitions to
- * the video (done) or the error state (failed) automatically. The server
- * already patched the persisted document on success, so the server-relative
- * src doubles as the task's renderable URL — it works as-is in the browser.
+ * the video (done) or the error state (failed) automatically.
+ *
+ * A done frame's `src` is the id the asset pool allocated, not a URL: the
+ * tools store their bytes in the pool and the server's completion patch writes
+ * that id onto the element (#1522). The task therefore carries an identity
+ * rather than renderable bytes; what renders the video is the element's own
+ * reference once the stage-freshness sync brings the patched scene in, which
+ * the same `putScene` wakes. The frame still settles the skeleton, which is
+ * what this fold is for.
  */
 import type { MediaReadyLifecycleData } from '@/lib/agent-runtime/lifecycle';
 import { useMediaGenerationStore, type MediaTask } from '@/lib/store/media-generation';
