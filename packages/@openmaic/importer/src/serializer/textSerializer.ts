@@ -1475,7 +1475,13 @@ export function renderTextBody(
       const measureTabText = (text: string, paintStyle: string): number => {
         // Read the same resolved CSS we emit, including table overrides and caps.
         const sizePx =
-          (Number(paintStyle.match(/font-size: ([\d.]+)pt/)?.[1] ?? effectiveFontSize) * 4) / 3;
+          // Baseline shifts append a smaller font-size; CSS uses the last declaration.
+          (Number(
+            Array.from(paintStyle.matchAll(/font-size: ([\d.]+)pt/g)).pop()?.[1] ??
+              effectiveFontSize,
+          ) *
+            4) /
+          3;
         const spacingPx =
           (Number(paintStyle.match(/letter-spacing: (-?[\d.]+)pt/)?.[1] ?? 0) * 4) / 3;
         if (paintStyle.includes('text-transform: uppercase')) text = text.toUpperCase();
@@ -1664,7 +1670,7 @@ export function renderTextBody(
                 // Server estimates can undercount wide glyphs. Let their columns
                 // grow to the painted text width so following content cannot overlap.
                 const minWidth = tabMeasure ? '' : 'min-width:max-content;';
-                html += `<span style="display:inline-block;width:${widthPt.toFixed(2)}pt;${minWidth}text-indent:0;text-align:left;white-space:pre;">${text ? paint(text) : ''}</span>`;
+                html += `<span data-pptx-tab-column="true" style="display:inline-block;width:${widthPt.toFixed(2)}pt;${minWidth}text-indent:0;text-align:left;white-space:pre;">${text ? paint(text) : ''}</span>`;
                 tabCursorPx = stop;
               } else if (text) {
                 html += paint(text);

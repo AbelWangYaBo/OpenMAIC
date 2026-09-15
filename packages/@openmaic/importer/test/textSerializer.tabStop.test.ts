@@ -115,3 +115,37 @@ it.each(['ctr', 'r'])('keeps text at the start of a tab column in %s paragraphs'
   );
   expect(html).toMatch(/display:inline-block;[^\"]*text-align:left;/);
 });
+
+it('measures baseline-shifted text at its final painted size', () => {
+  const measuredFonts: string[] = [];
+  vi.stubGlobal(
+    'OffscreenCanvas',
+    class {
+      getContext() {
+        return {
+          font: '',
+          measureText(text: string) {
+            measuredFonts.push(this.font);
+            return { width: text === 'AAAA' ? (this.font.includes('17.333') ? 46.25 : 71.13) : 10 };
+          },
+        };
+      }
+    },
+  );
+  try {
+    const html = renderTxBodyHtml(
+      '<a:p><a:pPr><a:tabLst><a:tab pos="571500"/><a:tab pos="952500"/></a:tabLst></a:pPr><a:r><a:rPr sz="2000" baseline="30000"><a:latin typeface="Arial"/></a:rPr><a:t>AAAA\tB</a:t></a:r></a:p>',
+    );
+    expect(measuredFonts[0]).toContain('17.333');
+    expect(html).toContain('width:45.00pt;');
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it('marks custom tab columns so the editor can preserve their boundaries', () => {
+  const html = renderTxBodyHtml(
+    '<a:p><a:pPr><a:tabLst><a:tab pos="952500"/><a:tab pos="1905000"/></a:tabLst></a:pPr><a:r><a:rPr sz="1200"/><a:t>A\tB\tC</a:t></a:r></a:p>',
+  );
+  expect(html.match(/data-pptx-tab-column="true"/g)).toHaveLength(2);
+});

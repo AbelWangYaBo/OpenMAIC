@@ -15,6 +15,38 @@ const WHITE_SPACE_VALUES = new Set([
   'break-spaces',
 ]);
 
+// Tab columns own their text so adjacent equal-width columns cannot coalesce
+// as marks, and formatting part of the text cannot duplicate the column box.
+const pptxTabColumn: NodeSpec = {
+  inline: true,
+  group: 'inline',
+  content: 'inline*',
+  selectable: false,
+  whitespace: 'pre',
+  attrs: {
+    width: { default: '' },
+  },
+  parseDOM: [
+    {
+      tag: 'span[data-pptx-tab-column="true"]',
+      priority: 100,
+      preserveWhitespace: 'full',
+      getAttrs: (dom) => {
+        const { width } = (dom as HTMLElement).style;
+        return CSS_LENGTH_PATTERN.test(width) ? { width } : false;
+      },
+    },
+  ],
+  toDOM: (node: Node) => [
+    'span',
+    {
+      'data-pptx-tab-column': 'true',
+      style: `display: inline-block; width: ${node.attrs.width}; min-width: max-content; text-align: left; text-indent: 0; white-space: pre;`,
+    },
+    0,
+  ],
+};
+
 const inlineSpacer: NodeSpec = {
   inline: true,
   group: 'inline',
@@ -307,6 +339,7 @@ const schemaNodes = {
   bullet_list: bulletList,
   list_item: listItem,
   inline_spacer: inlineSpacer,
+  pptx_tab_column: pptxTabColumn,
 };
 
 export default schemaNodes;

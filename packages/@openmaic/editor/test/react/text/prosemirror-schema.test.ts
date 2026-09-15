@@ -1,11 +1,83 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
+import { EditorState } from 'prosemirror-state';
+import { textSchema } from '../../../src/react/text/prosemirror/schema';
 import {
   createTextDocument,
   serializeTextDocument,
 } from '../../../src/react/text/prosemirror/document';
 
 describe('renderer ProseMirror schema', () => {
+  const column = (text: string) =>
+    `<span data-pptx-tab-column="true" style="display: inline-block; width: 120px; min-width: max-content; text-align: left; text-indent: 0; white-space: pre">${text}</span>`;
+
+  it('keeps equal adjacent PPTX tab columns and an empty column as separate editable nodes', () => {
+    const doc = createTextDocument(`<p>${column('First')}${column('Second')}${column('')}</p>`);
+    expect(doc.firstChild!.childCount).toBe(3);
+    doc.firstChild!.forEach((node) => {
+      expect(node.type.name).toBe('pptx_tab_column');
+      expect(node.isAtom).toBe(false);
+      expect(node.attrs.width).toBe('120px');
+    });
+    const output = serializeTextDocument(doc);
+    const host = document.createElement('div');
+    host.innerHTML = output;
+    const columns = host.querySelectorAll<HTMLElement>('[data-pptx-tab-column="true"]');
+    expect(Array.from(columns, (node) => node.textContent)).toEqual(['First', 'Second', '']);
+    for (const node of columns) {
+      expect(node.style.minWidth).toBe('max-content');
+      expect(node.style.textAlign).toBe('left');
+      expect(node.style.textIndent).toMatch(/^0(?:px)?$/);
+      expect(node.style.whiteSpace).toBe('pre');
+    }
+    expect(createTextDocument(output).eq(doc)).toBe(true);
+  });
+
+  it('bolds a subset with Transform.addMark without splitting a tab column or losing run styles', () => {
+    const doc = createTextDocument(
+      `<p>${column('<span style="font-size: 20px; color: red; letter-spacing: 1px">A  BC</span>')}${column('Next')}</p>`,
+    );
+    // Transaction extends Transform: exercise its real addMark implementation.
+    const tr = EditorState.create({ schema: textSchema, doc }).tr.addMark(
+      5,
+      6,
+      textSchema.marks.strong.create(),
+    );
+    const host = document.createElement('div');
+    host.innerHTML = serializeTextDocument(tr.doc);
+    const columns = host.querySelectorAll<HTMLElement>('[data-pptx-tab-column="true"]');
+    expect(columns).toHaveLength(2);
+    expect(columns[0].textContent).toBe('A  BC');
+    expect(columns[0].querySelector('strong')?.textContent).toBe('B');
+    expect(columns[0].style.width).toBe('120px');
+    expect(columns[0].innerHTML).toContain('font-size: 20px');
+    expect(columns[0].innerHTML).toContain('color: red');
+    expect(columns[0].innerHTML).toContain('letter-spacing: 1px');
+    expect(createTextDocument(host.innerHTML).eq(tr.doc)).toBe(true);
+  });
+
+  it('formats all columns without adding marks to their outer nodes', () => {
+    const doc = createTextDocument(`<p>${column('A')}${column('B')}${column('')}</p>`);
+    const tr = EditorState.create({ schema: textSchema, doc }).tr.addMark(
+      1,
+      doc.content.size - 1,
+      textSchema.marks.strong.create(),
+    );
+    tr.doc.firstChild!.forEach((node) => {
+      expect(node.marks).toHaveLength(0);
+      node.forEach((text) => expect(text.marks.map((mark) => mark.type.name)).toEqual(['strong']));
+    });
+    expect(createTextDocument(serializeTextDocument(tr.doc)).eq(tr.doc)).toBe(true);
+  });
+
+  it('inserts text into an empty column and deletes its content without removing the column', () => {
+    const doc = createTextDocument(`<p>${column('')}${column('Next')}</p>`);
+    const inserted = EditorState.create({ schema: textSchema, doc }).tr.insertText('ABC', 2).doc;
+    expect(inserted.firstChild!.firstChild!.textContent).toBe('ABC');
+    const deleted = EditorState.create({ schema: textSchema, doc: inserted }).tr.delete(2, 5).doc;
+    expect(deleted.eq(doc)).toBe(true);
+  });
+
   it('round-trips legacy rich-text nodes and marks', () => {
     const html =
       '<blockquote><p style="text-align: center"><a href="https://maic.chat"><strong><u><span style="font-size: 28px; color: #ff0000">MAIC</span></u></strong></a></p></blockquote><ol><li><p>One</p></li></ol>';
