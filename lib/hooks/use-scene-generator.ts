@@ -28,7 +28,7 @@ import {
 import { resolveTTSModelForVoice } from '@/lib/audio/constants';
 import { useAgentRegistry } from '@/lib/orchestration/registry/store';
 import { generateMediaForOutlines } from '@/lib/media/media-orchestrator';
-import { putAsset } from '@/lib/media/asset-pool';
+import { commitToPool } from '@/lib/media/commit-to-pool';
 import { mayGenerateForStage } from '@/lib/classroom/generation-permission';
 import { isServerBackedMediaPersistence } from '@/lib/persistence/media-persistence';
 import { lazyBoundedMap } from '@/lib/utils/concurrency';
@@ -473,93 +473,109 @@ export async function generateAndStoreTTS(
   // clip onto a timeline without re-decoding. null → leave undefined; the audio
   // still persists and plays.
   const duration = measureAudioDuration(bytes, data.format) ?? undefined;
-  const serverBacked = isServerBackedMediaPersistence();
-  // Server-backed: the bytes go to the pool and the pool allocates the
-  // identity, so the id the speech action ends up holding names durable audio
-  // rather than this browser's local table. Bytes land BEFORE the caller
-  // stamps the action, so a document can never name narration that was not
-  // stored. Browser-only keeps the historical derived key: document and audio
-  // share one lifetime there, and nothing outside this browser reads either.
-  let audioId: string;
-  if (serverBacked) {
-    const allocated = await allocatePooledAudio(blob, duration, stageId).catch((error: unknown) => {
-      // Storing narration failed, not synthesizing it. A scene whose audio
-      // cannot be stored keeps its text and leaves the line unvoiced and
-      // retryable, exactly as an image that cannot be stored leaves its slide;
-      // reporting it as a TTS failure would pause the whole deck at its first
-      // slide over one clip's storage.
-      log.warn('Narration storage failed; leaving the line unvoiced:', error);
-      return null;
-    });
-    if (allocated === null) return null;
-    audioId = allocated;
-  } else {
-    audioId = existingAudioId ?? requestId;
-  }
-  const cacheWrite = db.audioFiles.put({
-    id: audioId,
+  /** This clip's local row, under whichever id it is currently known by. */
+  const cachedNarrationRow = (id: string) => ({
+    id,
     stageId,
     blob,
     duration,
-    format: data.format,
+    format: data.format as string,
     text,
     voice: ttsVoice,
     createdAt: Date.now(),
   });
-  if (serverBacked) {
-    // A cache the pool already backs: a failed write costs a re-download.
-    await cacheWrite.catch((error: unknown) => {
-      log.warn('Local narration cache write failed for', audioId, error);
-    });
-  } else {
-    await cacheWrite;
+  const serverBacked = isServerBackedMediaPersistence();
+  // Browser-only keeps the historical derived key: document and audio share one
+  // lifetime there, and nothing outside this browser reads either.
+  if (!serverBacked) {
+    const audioId = existingAudioId ?? requestId;
+    await db.audioFiles.put(cachedNarrationRow(audioId));
+    return audioId;
   }
-  return audioId;
+
+  // Server-backed: the bytes go to the pool and the pool allocates the
+  // identity, so the id the speech action ends up holding names durable audio
+  // rather than this browser's local table. Bytes land BEFORE the caller stamps
+  // the action, so a document can never name narration that was not stored.
+  const outcome = await commitToPool<void>({
+    stageId,
+    // The derived key, which is both what a refusal keeps the bytes under and
+    // what narration adoption reads them back by on a later load.
+    slot: requestId,
+    bytes: blob,
+    mimeType: blob.type,
+    ...(duration === undefined ? {} : { meta: { durationSeconds: duration } }),
+    // The bytes were just bought. A full store must not be what throws them
+    // away: keeping them under the derived key is what lets the next load
+    // re-attempt the upload from cache instead of paying the provider again,
+    // which is the same contract the media pass's retained bytes have had since
+    // it learned to keep them. See the caller's handling below for the other
+    // half of it -- the action has to carry this key for adoption to find them.
+    retain: async () => {
+      await db.audioFiles.put(cachedNarrationRow(requestId)).catch((error: unknown) => {
+        log.warn('Could not keep refused narration for', requestId, error);
+      });
+    },
+    // Nothing to write back: the action this narration belongs to is not in the
+    // document yet. The caller stamps it from the id returned here, which is
+    // why this path has no funnel of its own to invent one.
+    writeBack: async () => undefined,
+    // A cache the pool already backs: a failed write costs a re-download.
+    mirror: async (assetId) => {
+      await db.audioFiles.put(cachedNarrationRow(assetId)).catch((error: unknown) => {
+        log.warn('Local narration cache write failed for', assetId, error);
+      });
+    },
+  });
+
+  if (outcome.status === 'stored') return outcome.assetId;
+  if (outcome.status === 'refused-retained') {
+    // The store had no room, and the bytes are kept. The action is stamped with
+    // the derived key they are kept under, exactly as a refused image leaves
+    // its placeholder in the slide: adoption reads that key on the next load,
+    // re-attempts the upload, and writes the allocated id back with no provider
+    // called. Returning null instead would leave the line unvoiced AND the
+    // bytes unreachable, which is paying for the same clip on every attempt.
+    log.warn(
+      `Asset storage is full; keeping the narration for ${requestId} under its derived key.`,
+    );
+    return requestId;
+  }
+  // Storing narration failed for some other reason, and that says nothing about
+  // whether a later attempt would fit, so nothing is kept under a key a later
+  // load would take for adoptable narration. A scene whose audio cannot be
+  // stored keeps its text and leaves the line unvoiced and retryable, exactly
+  // as an image that cannot be stored leaves its slide; reporting it as a TTS
+  // failure would pause the whole deck at its first slide over one clip's
+  // storage.
+  log.warn('Narration storage failed; leaving the line unvoiced:', outcome.error);
+  return null;
 }
 
 /**
- * Store narration bytes in the asset pool and return the reference the
- * document should hold.
+ * Why a fresh clip never replaces the bytes behind an id it is superseding.
  *
- * Regeneration always forks to a fresh id; the caller's `existingAudioId` is
- * deliberately ignored here. Replacing bytes behind a live id requires proof
- * that no other document holds it, and that proof is unavailable by
+ * Regeneration always forks; the caller's `existingAudioId` is deliberately
+ * ignored on the server-backed path. Replacing bytes behind a live id requires
+ * proof that no other document holds it, and that proof is unavailable by
  * construction once references can leave this browser — asking the pool who
  * else holds an id would be exactly the existence oracle the asset contract
  * forbids, so `proveExclusiveAssetOwnership` fails closed under server-backed
  * persistence and every caller forks. Keeping a branch that can never be taken
  * would only describe a capability this deployment shape does not have.
  *
- * The superseded id is NOT removed here. Nothing at this point has observed
- * the new id reaching a durable document, so deleting the old bytes could
- * leave a still-referenced action pointing at nothing if the save that follows
- * fails; and the exclusivity that would make deletion safe is the same proof
- * that is unavailable. It does not have to be removed here: the save that
- * writes the new id is also the write that stops naming the old one, so the
- * server stamps the superseded entry as it lands and the collector releases it
- * after the grace period, the bytes following after their own. If that save
- * never lands, it is the NEW id that nothing committed, and it expires on
+ * The superseded id is NOT removed either. Nothing at this point has observed
+ * the new id reaching a durable document, so deleting the old bytes could leave
+ * a still-referenced action pointing at nothing if the save that follows fails;
+ * and the exclusivity that would make deletion safe is the same proof that is
+ * unavailable. It does not have to be removed here: the save that writes the
+ * new id is also the write that stops naming the old one, so the server stamps
+ * the superseded entry as it lands and the collector releases it after the
+ * grace period, the bytes following after their own. If that save never lands,
+ * it is the NEW id that nothing committed, and it expires on
  * `ASSET_PENDING_TTL_MS` — either way regeneration leaves nothing permanent
  * behind.
  */
-async function allocatePooledAudio(
-  blob: Blob,
-  duration: number | undefined,
-  stageId: string | undefined,
-): Promise<string> {
-  return putAsset(
-    blob,
-    {
-      contentType: blob.type,
-      ...(duration === undefined ? {} : { durationSeconds: duration }),
-    },
-    // A write that goes through retires this course's "no room" note. This path
-    // allocates directly rather than through the media commit, so without it a
-    // course whose narration is generated rather than adopted has nothing that
-    // can establish that.
-    { ...(stageId ? { stageId } : {}) },
-  );
-}
 
 /**
  * Drop the local copies of narration a scene has rolled back.
