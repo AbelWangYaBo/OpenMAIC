@@ -144,8 +144,7 @@ export function mediaPosterArchivePath(index: number): string {
 export async function collectAudioFiles(
   entries: readonly AssetManifestEntry[],
 ): Promise<CollectedAudio[]> {
-  const collected: CollectedAudio[] = [];
-  for (const [index, entry] of entries.entries()) {
+  const collected = await mapWithConcurrency(entries, 6, async (entry, index) => {
     const audioId = entry.ref;
     // The pool answers first: after a stable-id regeneration whose mirror
     // write failed, the row holds the superseded narration. A ref whose bytes
@@ -153,21 +152,21 @@ export async function collectAudioFiles(
     const blob = await resolveAudioBlob(audioId);
     // A row with no usable bytes -- an evicted row (empty blob, no pool
     // resolve) -- must not ship an empty audio file.
-    if (!blob || blob.size === 0) continue;
+    if (!blob || blob.size === 0) return null;
     const record = await db.audioFiles.get(audioId);
     const canonical = canonicalArchiveMedia('audio', { extension: record?.format });
     const ext = canonical.extension;
     const resolved = (
       record ? { ...record, blob, format: ext } : { id: audioId, blob, format: ext }
     ) as AudioFileRecord;
-    collected.push({
+    return {
       zipPath: audioArchivePath(index, ext),
       sourceRef: entry.ref,
       record: resolved,
       mimeType: canonical.mimeType,
-    });
-  }
-  return collected;
+    } satisfies CollectedAudio;
+  });
+  return collected.filter((file): file is CollectedAudio => file != null);
 }
 
 /**

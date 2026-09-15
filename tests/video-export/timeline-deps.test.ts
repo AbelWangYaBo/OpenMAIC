@@ -215,6 +215,36 @@ describe('createVideoTimelineDeps — legacy URL audio fallback', () => {
     vi.unstubAllGlobals();
   });
 
+  it('uses probed duration for remotely resolved narration with no stored duration', async () => {
+    const audioId = 'ast_remote_speech';
+    const remoteBlob = new Blob(['remote-speech'], { type: 'audio/mpeg' });
+    const action = { id: 'speech', type: 'speech', text: 'A deliberately long line', audioId };
+    audioGet.mockResolvedValue({
+      id: audioId,
+      blob: new Blob([], { type: 'audio/mpeg' }),
+      format: 'mp3',
+      ossKey: 'https://cdn.example.com/audio/remote.mp3',
+      createdAt: 0,
+    });
+    resolveAudioBlobMock.mockResolvedValue(remoteBlob);
+    vi.stubGlobal('document', { createElement: () => fakeAudioElement(4.75) });
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:remote-probe');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+
+    const deps = await createVideoTimelineDeps({
+      stage: { id: STAGE_ID },
+      scenes: [slideScene({ id: 'text_1', type: 'text' }, [action])],
+    });
+
+    expect(deps.timing.audioDurationMs(action as never)).toBe(4750);
+    expect(deps.assets.audio(action as never)).toMatchObject({
+      present: true,
+      durationMs: 4750,
+    });
+
+    vi.unstubAllGlobals();
+  });
+
   it('ingests a dangling pair through its URL and surfaces a present, probed narration asset', async () => {
     const legacyUrl = 'https://server.example.com/audio/legacy.mp3';
     fetchMediaUrlMock.mockResolvedValue(

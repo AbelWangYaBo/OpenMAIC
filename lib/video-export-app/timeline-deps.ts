@@ -114,23 +114,24 @@ const PROBE_TIMEOUT_MS = 10_000;
 const PROBE_CONCURRENCY = 6;
 
 /**
- * Run `worker` over `items` with bounded concurrency, collecting results. Order
- * is not significant to callers (they key results into a Map), so this drains a
- * shared cursor from `PROBE_CONCURRENCY` lanes.
+ * Run `worker` over `items` with bounded concurrency. Results preserve input
+ * order even though work completes independently across the shared lanes.
  */
-async function mapWithConcurrency<T>(
+async function mapWithConcurrency<T, R>(
   items: T[],
   limit: number,
-  worker: (item: T) => Promise<void>,
-): Promise<void> {
+  worker: (item: T) => Promise<R>,
+): Promise<R[]> {
   let cursor = 0;
+  const results = new Array<R>(items.length);
   const lanes = Array.from({ length: Math.min(limit, items.length) }, async () => {
     while (cursor < items.length) {
       const i = cursor++;
-      await worker(items[i]);
+      results[i] = await worker(items[i]);
     }
   });
   await Promise.all(lanes);
+  return results;
 }
 
 /**
@@ -256,20 +257,31 @@ export async function createVideoTimelineDeps(input: {
     ),
   );
   const audioById = new Map<string, AudioFileRecord>();
-  for (const audioId of audioIds) {
-    // Bytes come only from the shared resolver: pool-first, so a stable-id
-    // regeneration whose mirror write failed (the row then holds the
-    // superseded narration) still exports what the classroom plays; the row's
-    // own blob is the resolver's legacy fallback. The row read here supplies
-    // duration/format/ossKey metadata for the compiler's sync lookups.
-    const record = await db.audioFiles.get(audioId);
-    const blob = await resolveAudioBlob(audioId);
-    if (blob)
+  const resolvedAudio = await mapWithConcurrency(
+    [...audioIds],
+    PROBE_CONCURRENCY,
+    async (audioId) => {
+      // Bytes come only from the shared resolver: pool-first, so a stable-id
+      // regeneration whose mirror write failed (the row then holds the
+      // superseded narration) still exports what the classroom plays; the row's
+      // own blob is the resolver's legacy fallback. The row read here supplies
+      // duration/format/ossKey metadata for the compiler's sync lookups.
+      const record = await db.audioFiles.get(audioId);
+      const blob = await resolveAudioBlob(audioId);
+      return { audioId, blob, record };
+    },
+  );
+  for (const resolved of resolvedAudio) {
+    if (!resolved) continue;
+    const { audioId, blob, record } = resolved;
+    if (blob) {
       audioById.set(
         audioId,
         record ? { ...record, blob } : ({ id: audioId, blob } as AudioFileRecord),
       );
-    else if (record) audioById.set(audioId, record);
+    } else if (record) {
+      audioById.set(audioId, record);
+    }
   }
   // An unconverted document can carry narration only as a legacy URL: the
   // playback paths fall back to it, and the export must too, or a playable

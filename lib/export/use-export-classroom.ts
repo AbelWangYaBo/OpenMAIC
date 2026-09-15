@@ -56,6 +56,7 @@ export interface ClassroomExportZip {
   zip: Blob;
   fileName: string;
   inlineFailures: InlineReport['failed'];
+  missingAudioCount: number;
 }
 
 /**
@@ -96,6 +97,7 @@ export async function buildClassroomExportZip(
   const exportScenes = documentScenes;
 
   let zipBlob: Blob;
+  let missingAudioCount = 0;
   const aggregateReport: InlineReport = { inlined: [], failed: [] };
   try {
     // 3. Collect the roster from the in-memory stage (single source of truth;
@@ -202,6 +204,7 @@ export async function buildClassroomExportZip(
     // is handled by collectLegacyAudioForExport above.
     for (const [index, entry] of audioEntries.entries()) {
       if (!audioIdToPath.has(entry.ref)) {
+        missingAudioCount += 1;
         mediaIndexEntries.push([
           audioArchivePath(index, 'mp3'),
           {
@@ -251,6 +254,7 @@ export async function buildClassroomExportZip(
     zip: zipBlob,
     fileName: `${safeName}${CLASSROOM_ZIP_EXTENSION}`,
     inlineFailures: aggregateReport.failed,
+    missingAudioCount,
   };
 }
 
@@ -266,12 +270,19 @@ export function useExportClassroom() {
     const toastId = toast.loading(t('export.exporting'));
 
     try {
-      const { zip, fileName, inlineFailures } = await buildClassroomExportZip(stage, scenes);
+      const { zip, fileName, inlineFailures, missingAudioCount } = await buildClassroomExportZip(
+        stage,
+        scenes,
+      );
 
       saveAs(zip, fileName);
 
-      if (inlineFailures.length > 0) {
-        log.warn('Some interactive-scene assets could not be inlined:', inlineFailures);
+      const partialCount = inlineFailures.length + missingAudioCount;
+      if (partialCount > 0) {
+        log.warn('Some referenced assets could not be bundled:', {
+          inlineFailures,
+          missingAudioCount,
+        });
         const hosts = [
           ...new Set(
             inlineFailures.map((f) => {
@@ -283,11 +294,13 @@ export function useExportClassroom() {
             }),
           ),
         ];
-        toast.warning(t('export.inlinePartial', { count: inlineFailures.length }), {
-          description: hosts.join(', '),
+        toast.warning(t('export.inlinePartial', { count: partialCount }), {
+          id: toastId,
+          description: hosts.length > 0 ? hosts.join(', ') : undefined,
         });
+      } else {
+        toast.success(t('export.exportSuccess'), { id: toastId });
       }
-      toast.success(t('export.exportSuccess'), { id: toastId });
     } catch (error) {
       log.error('Classroom ZIP export failed:', error);
       toast.error(t('export.exportFailed'), { id: toastId });
