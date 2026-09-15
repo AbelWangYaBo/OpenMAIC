@@ -156,19 +156,24 @@ describe('a completed workbench video resolves through the real chain', () => {
  * rule is written down in `patchStageVideoPlaceholder`'s doc comment and every
  * combination is enumerated here:
  *
- *   src ∈ {this placeholder, previous ast_, user URL, absent}
- *   × mediaRef ∈ {this placeholder, previous ast_, other placeholder, absent}
+ *   src ∈ {this placeholder, previous ast_, user URL, legacy stage URL, absent}
+ *   × mediaRef ∈ {this placeholder, previous ast_, other placeholder,
+ *                 concrete URL (what the importer round-trips), absent}
  *   × poster ∈ {this placeholder, previous ast_, user URL, absent}
  *
- * Expectations are written out from the invariant, not derived from what the
+ * Expectations are written out from the stated rules, not derived from what the
  * implementation does, so an implementation that drifts fails rather than
- * redefines the table.
+ * redefines the table. Where a row follows from one of the two pre-existing
+ * replaceability policies rather than from the rules alone, the row says which.
  */
 describe('the completion patch over its whole state space', () => {
   const P = 'gen_vid_job';
   const A = 'ast_previous';
   const U = 'https://cdn.example.com/user.mp4';
+  const L = `/api/classroom-media/${STAGE}/media/old.mp4`;
   const O = 'gen_vid_other';
+  /** A concrete URL in `mediaRef` — what the classroom importer round-trips. */
+  const MU = 'https://cdn.example.com/imported.mp4';
   const N = 'ast_new_video';
   const NP = 'ast_new_poster';
   const UP = 'https://cdn.example.com/user.jpg';
@@ -196,19 +201,30 @@ describe('the completion patch over its whole state space', () => {
       expectedMediaRef: undefined,
       expectedSourceRef: N,
     },
+    // `src` is absent here, and it is FILLED with the new id. That does not
+    // follow from rule 1 alone -- no slot held the placeholder -- but from the
+    // pre-existing `isReplaceableSrc` policy, which treats absent, empty and a
+    // legacy this-stage URL as replaceable. Same policy, same reason, for `L`.
     { src: undefined, mediaRef: P, expectedSrc: N, expectedMediaRef: N, expectedSourceRef: N },
-    // Rule 2: `src` took the new id, so a stale generated `mediaRef` is retired
-    // instead of shadowing it. These two are the round-3 finding.
+    { src: L, mediaRef: P, expectedSrc: N, expectedMediaRef: N, expectedSourceRef: N },
+    // Rule 2: `src` took the new id, so anything else in `mediaRef` is retired
+    // instead of shadowing it. `A`/`O` are the round-3 finding; `MU` is the
+    // round-4 one -- the classroom importer round-trips a concrete `mediaRef`
+    // and `patch_stage` accepts any string there, so a URL parked in that slot
+    // used to hide the finished job.
     { src: P, mediaRef: A, expectedSrc: N, expectedMediaRef: undefined, expectedSourceRef: N },
     { src: P, mediaRef: O, expectedSrc: N, expectedMediaRef: undefined, expectedSourceRef: N },
+    { src: P, mediaRef: MU, expectedSrc: N, expectedMediaRef: undefined, expectedSourceRef: N },
     // Rule 1 only: an allocated id in `src` is a choice and stays; `mediaRef`
     // carries the new id, which `sourceRef` prefers over a non-concrete `src`.
     { src: A, mediaRef: P, expectedSrc: A, expectedMediaRef: N, expectedSourceRef: N },
     // Rule 3: the user's own address wins, and no finished job is left named.
+    // Rule 2 does not fire here -- `src` never took the new id.
     { src: U, mediaRef: P, expectedSrc: U, expectedMediaRef: N, expectedSourceRef: U },
-    // Unmatched: neither slot names this job.
+    // Unmatched: neither slot names this job, so nothing is touched.
     { src: A, mediaRef: A, expectedSrc: A, expectedMediaRef: A, expectedSourceRef: A },
     { src: A, mediaRef: O, expectedSrc: A, expectedMediaRef: O, expectedSourceRef: O },
+    { src: A, mediaRef: MU, expectedSrc: A, expectedMediaRef: MU, expectedSourceRef: MU },
     {
       src: A,
       mediaRef: undefined,
@@ -218,12 +234,23 @@ describe('the completion patch over its whole state space', () => {
     },
     { src: U, mediaRef: A, expectedSrc: U, expectedMediaRef: A, expectedSourceRef: U },
     { src: U, mediaRef: O, expectedSrc: U, expectedMediaRef: O, expectedSourceRef: U },
+    { src: U, mediaRef: MU, expectedSrc: U, expectedMediaRef: MU, expectedSourceRef: U },
     {
       src: U,
       mediaRef: undefined,
       expectedSrc: U,
       expectedMediaRef: undefined,
       expectedSourceRef: U,
+    },
+    { src: L, mediaRef: A, expectedSrc: L, expectedMediaRef: A, expectedSourceRef: L },
+    { src: L, mediaRef: O, expectedSrc: L, expectedMediaRef: O, expectedSourceRef: L },
+    { src: L, mediaRef: MU, expectedSrc: L, expectedMediaRef: MU, expectedSourceRef: L },
+    {
+      src: L,
+      mediaRef: undefined,
+      expectedSrc: L,
+      expectedMediaRef: undefined,
+      expectedSourceRef: L,
     },
     {
       src: undefined,
@@ -241,6 +268,13 @@ describe('the completion patch over its whole state space', () => {
     },
     {
       src: undefined,
+      mediaRef: MU,
+      expectedSrc: undefined,
+      expectedMediaRef: MU,
+      expectedSourceRef: MU,
+    },
+    {
+      src: undefined,
       mediaRef: undefined,
       expectedSrc: undefined,
       expectedMediaRef: undefined,
@@ -248,6 +282,9 @@ describe('the completion patch over its whole state space', () => {
     },
   ];
 
+  // The poster column follows `isReplaceablePoster`, the second pre-existing
+  // policy: a replaceable poster takes the POSTER id, not the video id, and an
+  // absent slot is filled. Neither follows from the three rules on their own.
   const posters: readonly { readonly poster: Slot; readonly expectedWhenMatched: Slot }[] = [
     // The job's own placeholder and an empty slot take the generated poster.
     { poster: P, expectedWhenMatched: NP },
@@ -258,6 +295,22 @@ describe('the completion patch over its whole state space', () => {
   ];
 
   const matched = (row: Row): boolean => row.src === P || row.mediaRef === P;
+
+  it('enumerates the whole space, with no row missing and none written twice', () => {
+    // `rows.length * posters.length` would be true of any table, including one
+    // a row was quietly dropped from. The cross product is named outright.
+    const srcValues: readonly Slot[] = [P, A, U, L, undefined];
+    const mediaRefValues: readonly Slot[] = [P, A, O, MU, undefined];
+    const seen = rows.map((row) => `${row.src ?? '-'}|${row.mediaRef ?? '-'}`);
+    const expected = srcValues.flatMap((src) =>
+      mediaRefValues.map((mediaRef) => `${src ?? '-'}|${mediaRef ?? '-'}`),
+    );
+    expect([...seen].sort()).toEqual([...expected].sort());
+    expect(rows).toHaveLength(25);
+    expect(posters).toHaveLength(4);
+    expect(rows.filter(matched)).toHaveLength(9);
+  });
+
   const key = (row: Row, poster: Slot) =>
     `src=${row.src ?? '-'} mediaRef=${row.mediaRef ?? '-'} poster=${poster ?? '-'}`;
 
@@ -276,7 +329,7 @@ describe('the completion patch over its whole state space', () => {
         });
       }
     }
-    expect(canvas.elements).toHaveLength(rows.length * posters.length);
+    expect(canvas.elements).toHaveLength(100);
     fake.docs.set(STAGE, makeDocument(STAGE, 'Course', [scene]));
 
     await patchStageVideoPlaceholder(fake.store, STAGE, P, { src: N, poster: NP });

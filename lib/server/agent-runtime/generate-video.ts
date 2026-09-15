@@ -28,7 +28,6 @@ import {
   readResponseBodyWithLimit,
 } from '@/lib/server/bounded-download';
 import { isGeneratedMediaPlaceholder } from '@/lib/media/media-ref';
-import { mayNameAPoolAsset } from '@/lib/media/media-placeholder';
 import {
   AssetStorageFullError,
   storeGeneratedAssetOrThrow,
@@ -113,19 +112,6 @@ type PersistGeneratedVideo = (input: PersistVideoInput) => Promise<PersistedVide
 
 /** The stored ids the completion patch writes onto the element. */
 type PersistedMedia = Pick<PersistedVideo, 'src' | 'poster'>;
-
-/**
- * Whether a slot value names generated media rather than an address.
- *
- * An allocated pool id and a `gen_*` placeholder are both references something
- * has to resolve; a URL or a path is not. Only the former can shadow a newly
- * written id in `sourceRef`, and only the former is retired by the completion
- * patch's normalization.
- */
-function isGeneratedReference(value: unknown): value is string {
-  if (typeof value !== 'string') return false;
-  return mayNameAPoolAsset(value) || isGeneratedMediaPlaceholder(value);
-}
 
 export interface GenerateVideoToolDeps extends Pick<CourseToolDeps, 'sessionId' | 'abortSignal'> {
   /**
@@ -386,39 +372,50 @@ async function emitMediaReadyFrame(
  * tells the model to put the ref on `mediaRef`) would store, reference and
  * commit a video that never renders — live or after reload.
  *
- * THE INVARIANT, stated once rather than grown case by case. For a matched
- * element, with `P` = this job's placeholder, `N` = the id just allocated:
+ * THE INVARIANT, stated once rather than grown case by case. An element is
+ * MATCHED when `src` or `mediaRef` holds `P`, this job's placeholder; `N` is
+ * the video id just allocated and `NP` the poster id. For a matched element:
  *
- *   1. every slot holding `P` (`src`, `mediaRef`, `poster`) becomes `N`;
- *   2. once `src` holds `N`, `mediaRef` may hold `N` or nothing — any other
- *      GENERATED reference there (a previous `ast_` id, a stale `gen_*`
- *      placeholder) is removed, because `sourceRef` would prefer it;
- *   3. a user's own concrete `src` is never touched, and still wins.
+ *   1. every REPLACEABLE slot takes the new id. Replaceable is decided by the
+ *      two policies below, not by this list: `isReplaceableSrc` — `P` itself,
+ *      absent, empty, or a legacy `/api/classroom-media/<this stage>/` URL —
+ *      takes `N`; `isReplaceablePoster` — `P` itself, absent, empty, or any
+ *      `gen_*` placeholder — takes `NP`; and a `mediaRef` holding `P` takes
+ *      `N`. The two policies predate this invariant and are the reason an
+ *      absent `src` is filled rather than left alone.
+ *   2. once `src` holds `N`, `mediaRef` holds `N` or nothing. Anything else
+ *      there is retired, generated or not: `sourceRef` prefers `mediaRef`, so
+ *      whatever else sits there hides a video this element was deliberately
+ *      bound to. A concrete URL is retired too — the importer round-trips one
+ *      into `mediaRef` (`lib/import/use-import-classroom.ts:58-63`) and
+ *      `patch_stage` accepts any string there
+ *      (`course-edit/element-schema.ts:406`), so "no writer produces that
+ *      shape" was simply false, and the shape hid the finished job.
+ *   3. a choice is preserved: a concrete `src`, an allocated `src`, and an
+ *      allocated or author-chosen `poster`. Rule 2 never fires against these,
+ *      because it is conditioned on `src` having taken `N`.
  *
- * The space the rules have to cover, and what `sourceRef` resolves to after
- * the patch (`A` = a previous allocated id, `U` = a user's URL, `O` = another
- * placeholder, `L` = a legacy `/api/classroom-media/<this stage>/` URL):
+ * The space the rules cover, and what `sourceRef` resolves to after the patch
+ * (`A` = a previous allocated id, `U` = a user's URL in `src`, `MU` = a
+ * concrete URL in `mediaRef`, `O` = another job's placeholder, `L` = a legacy
+ * `/api/classroom-media/<this stage>/` URL):
  *
- *   src \ mediaRef │  P        A        O        (absent)
- *   ───────────────┼──────────────────────────────────────
- *   P              │  N        N¹       N¹       N
- *   A              │  N²       –        –        –
- *   U              │  U³       –        –        –
- *   L              │  N        –        –        –
- *   (absent)       │  N        –        –        –
+ *   src \ mediaRef │  P        A        O        MU       (absent)
+ *   ───────────────┼────────────────────────────────────────────────
+ *   P              │  N        N¹       N¹       N¹       N
+ *   A              │  N²       –        –        –        –
+ *   U              │  U³       –        –        –        –
+ *   L              │  N        –        –        –        –
+ *   (absent)       │  N        –        –        –        –
  *
- *   ¹ rule 2: `src` took `N`, so the stale `mediaRef` is removed and `N` is
- *     what `sourceRef` selects through the `src` fallback.
+ *   ¹ rule 2: `src` took `N`, so whatever else `mediaRef` held is removed and
+ *     `N` is what `sourceRef` selects through the `src` fallback.
  *   ² rule 1 only: `src` keeps `A` (an allocated id is a choice, not a
  *     placeholder), `mediaRef` takes `N`, and `sourceRef` prefers `mediaRef`
  *     over a `src` that is not a concrete address — so `N` renders.
  *   ³ the user's pick is `concreteSrc`, which beats `mediaRef`; `mediaRef`
  *     still takes `N` so no finished job is left named on the page.
  *   – unmatched: neither slot holds `P`, so the element is not touched.
- *
- * A concrete URL sitting in `mediaRef` is not in the space: no writer produces
- * one, and rule 2 deliberately retires only generated references rather than
- * deleting a value someone may have put there on purpose.
  *
  * This `putScene` is also the write that commits both allocations and records
  * their rows in `document_asset_refs` — the store does that inside the write's
@@ -485,31 +482,32 @@ export async function patchStageVideoPlaceholder(
       if (element.type !== 'video') return element;
       if (element.mediaRef !== ref && element.src !== ref) return element;
 
-      // RULE 1 — every slot holding THIS job's placeholder becomes the new id.
-      // The `mediaRef` rewrite is safe even when the user has swapped in their
-      // own concrete `src`: a concrete src still wins in
-      // `resolveVideoMediaForElement`, so their pick renders and `mediaRef`
-      // merely stops being a dangling placeholder.
+      // RULE 1 — every replaceable slot takes the new id (see the two
+      // policies above for what that means per slot). The `mediaRef` rewrite
+      // is safe even when the user has swapped in their own concrete `src`: a
+      // concrete src still wins in `resolveVideoMediaForElement`, so their
+      // pick renders and `mediaRef` merely stops being a dangling placeholder.
       let nextMediaRef = element.mediaRef === ref ? media.src : element.mediaRef;
       const nextSrc = isReplaceableSrc(element.src) ? media.src : element.src;
       const nextPoster =
         media.poster && isReplaceablePoster(element.poster) ? media.poster : element.poster;
 
       // RULE 2 — nothing may shadow the id we just wrote into `src`. Once
-      // `src` holds this job's allocated id, `mediaRef` may hold that same id
-      // or nothing at all: any OTHER generated reference there wins in
-      // `sourceRef` and would render the previous video, or a skeleton,
-      // forever. This is the classic chain's `normalizeGeneratedVideoRefs`
+      // `src` holds this job's allocated id, `mediaRef` holds that same id or
+      // nothing at all: whatever else sits there wins in `sourceRef` and would
+      // render the previous video, another job's skeleton, or an imported URL
+      // forever. It applies whether or not that value is a generated
+      // reference — a concrete URL reaches `mediaRef` through the importer and
+      // through `patch_stage`, and hid the finished job just as effectively.
+      // The element was bound to THIS job on purpose, so its result is what
+      // has to resolve. This is the classic chain's
+      // `normalizeGeneratedVideoRefs`
       // (`packages/@openmaic/generation/src/scene-generator.ts:437-440`, which
       // deletes `mediaRef` whenever a non-generated `src` is set) expressed for
       // the one transition this patch performs; that function is private to the
       // generation package and keyed on outline vocabulary, so the rule is
       // mirrored rather than imported.
-      if (
-        nextSrc === media.src &&
-        isGeneratedReference(nextMediaRef) &&
-        nextMediaRef !== media.src
-      ) {
+      if (nextSrc === media.src && nextMediaRef !== media.src) {
         nextMediaRef = undefined;
       }
 
