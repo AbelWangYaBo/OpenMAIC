@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { isCoursewareReferenceEnabled } from '@/lib/config/feature-flags';
 import {
   OBSERVATION_ATTRIBUTE,
   OBSERVATION_SCOPE_ID,
@@ -100,6 +101,10 @@ export function attachInteractiveState(
     throw new ElementReferenceValidationError(
       'Interactive state cannot accompany a slide element reference',
     );
+  // The courseware-reference feature owns this evidence channel. While it is
+  // disabled an ordinary question must not gain state constraints, not even for
+  // a Scene that declares the interface but can never be sampled.
+  if (!isCoursewareReferenceEnabled()) return { elementReference: resolved, stateNote: undefined };
   // A Scene that declares the interface always gets an availability boundary, even
   // when the browser produced no packet at all (unsupported crypto, failed digest).
   // Courseware without the interface keeps its previous unreferenced behaviour.

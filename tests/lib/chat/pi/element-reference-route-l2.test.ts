@@ -664,6 +664,26 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
     expect(mocks.resolveModel).not.toHaveBeenCalled();
   });
 
+  it('injects no state constraints while the courseware-reference feature is disabled', async () => {
+    // Regression: the Host used to add the full page-state block to an ordinary
+    // question whenever the current Scene declared the interface, even with the
+    // feature off and nothing to sample.
+    delete process.env[coursewareReferenceFlag];
+    installAgentShell('Mock ungated answer.');
+    const { interactiveState: _unused, ...rest } = runtimeBody();
+    const body = rest as Record<string, unknown>;
+    delete body.elementReference;
+    const { POST } = await import('@/app/api/chat/pi/route');
+    const response = await POST(makeRequest(body));
+    expect(response.status).toBe(200);
+    await response.text();
+    for (const prompt of [mocks.directorPrompts.join('\n'), mocks.legacyChildPrompts.join('\n')]) {
+      expect(prompt).not.toContain('PAGE-REPORTED STATE');
+      expect(prompt).not.toContain('page_reported_state');
+      expect(prompt).not.toContain('No component is referenced this turn');
+    }
+  });
+
   it.each(['dynamic-selector', 'wrong-source', 'wrong-scope'] as const)(
     'rejects %s before any model call',
     async (kind) => {

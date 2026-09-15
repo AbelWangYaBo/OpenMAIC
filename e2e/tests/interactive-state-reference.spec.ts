@@ -119,6 +119,13 @@ test('actual classroom component reference samples declared area state on send w
   await expect(outline).toBeHidden();
   // Follow-up with no new reference: the identity is gone, the facts are fresh.
   await frame.locator('#value').press('End');
+  // An accepted answer may close the composer, so reopen it the same way the
+  // first question did before asserting the unreferenced follow-up.
+  if (!(await input.isVisible())) {
+    await page.getByRole('heading', { name: 'Slider experiment' }).click();
+    await page.keyboard.press('T');
+    await expect(input).toBeVisible();
+  }
   await input.fill('And now?');
   const followUpPromise = page.waitForRequest('**/api/chat/pi');
   await input.press('Enter');
