@@ -140,6 +140,39 @@ describe('commitToPool', () => {
     await expect(outcome.refused.bytes.text()).resolves.toBe('generated-bytes');
   });
 
+  // `refused-retained` is what a caller reads before stamping `slot` into
+  // something durable. A sink that could not keep the bytes leaves nothing to
+  // read back, so the outcome must not claim otherwise.
+  it('demotes a refusal to failed when the bytes could not be kept', async () => {
+    mocks.poolPut.mockRejectedValue(quotaRefusal());
+    const retentionError = new Error('local quota exceeded');
+    const current = plan({ retain: vi.fn().mockRejectedValue(retentionError) });
+
+    await expect(commitToPool(current)).resolves.toEqual({
+      status: 'failed',
+      error: retentionError,
+    });
+
+    expect(current.writeBack).not.toHaveBeenCalled();
+    expect(current.mirror).not.toHaveBeenCalled();
+  });
+
+  // By the time the mirror runs the bytes are in the pool and the document
+  // names them, so a cache this browser could not write costs a re-download and
+  // nothing else. Holding that here rather than at each caller is what keeps
+  // the next caller from failing a commit that already happened.
+  it('reports stored even when the local mirror fails', async () => {
+    const current = plan({ mirror: vi.fn().mockRejectedValue(new Error('cache unavailable')) });
+
+    await expect(commitToPool(current)).resolves.toEqual({
+      status: 'stored',
+      assetId: 'ast_allocated',
+      placement: 'written',
+    });
+
+    expect(current.mirror).toHaveBeenCalledTimes(1);
+  });
+
   // Anything that is not the store saying "no room" says nothing about a later
   // attempt, so nothing is kept under a key a later attempt would read.
   it('keeps nothing for a failure that is not a refusal for room', async () => {
@@ -160,6 +193,17 @@ describe('commitToPool', () => {
   it('treats an unrelated structured code as an ordinary failure', async () => {
     mocks.poolPut.mockRejectedValue(
       Object.assign(new Error('nope'), { code: 'CONTENT_SENSITIVE' }),
+    );
+
+    await expect(commitToPool(plan())).resolves.toMatchObject({ status: 'failed' });
+  });
+
+  // `errorCode` is the generation routes' field, on an error class a pool write
+  // cannot raise. Accepting it here would widen the predicate past anything
+  // `putAsset` can throw, on values from another contract.
+  it('does not read the generation routes\u2019 errorCode field', async () => {
+    mocks.poolPut.mockRejectedValue(
+      Object.assign(new Error('nope'), { errorCode: 'ASSET_QUOTA_EXCEEDED' }),
     );
 
     await expect(commitToPool(plan())).resolves.toMatchObject({ status: 'failed' });

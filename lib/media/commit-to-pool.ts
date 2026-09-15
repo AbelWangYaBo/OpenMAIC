@@ -28,10 +28,13 @@
  *   re-uploads them instead of buying them again. Callers whose bytes are
  *   already there (adoption reads the very row it would write) pass no `retain`
  *   and say so.
- * - The order of the remaining steps. A reference reaches the document only
- *   after the pool answered with an id, and the local mirror is written only
- *   after the write-back, so the document can never name bytes that were not
- *   stored and the cache can never outlive a write-back that did not happen.
+ * - The order of the remaining steps, and which of them may fail the commit. A
+ *   reference reaches the document only after the pool answered with an id, and
+ *   the local mirror is written only after the write-back, so the document can
+ *   never name bytes that were not stored and the cache can never outlive a
+ *   write-back that did not happen. The mirror itself is best-effort here
+ *   rather than at each caller: by then the bytes are stored and the document
+ *   names them, so a cache write costs a re-download at worst.
  *
  * What this deliberately does NOT own:
  *
@@ -51,8 +54,11 @@
  */
 import type { AssetMeta } from '@openmaic/dsl';
 
+import { createLogger } from '@/lib/logger';
 import { putAsset } from '@/lib/media/asset-pool';
 import { ASSET_QUOTA_EXCEEDED, isStorageFullFailure } from '@/lib/media/media-failure';
+
+const log = createLogger('PoolCommit');
 
 /**
  * Bytes a full store refused, handed back so nothing has to be bought twice.
@@ -123,6 +129,13 @@ export interface PoolCommitPlan<TPlacement> {
    * adoption reads exactly the row it would write — and by a caller carrying
    * them out to a record it writes itself. A caller that omits it is stating
    * that the bytes survive the refusal, not that they do not matter.
+   *
+   * A sink that cannot keep the bytes must REJECT rather than swallow: the
+   * commit then reports `failed`, not `refused-retained`. That is the whole
+   * value of the outcome's name — a caller reading `refused-retained` goes on
+   * to stamp `slot` into something durable, and a stamp naming bytes no local
+   * table holds is a reference that resolves to nothing for the rest of the
+   * course's life.
    */
   readonly retain?: (refused: RefusedPoolBytes) => Promise<void>;
   /**
@@ -134,7 +147,14 @@ export interface PoolCommitPlan<TPlacement> {
    * was retained) that only the caller can act on.
    */
   readonly writeBack: (assetId: string) => Promise<TPlacement>;
-  /** Mirror the bytes locally under the allocated id. Best-effort by contract. */
+  /**
+   * Mirror the bytes locally under the allocated id.
+   *
+   * Best-effort, and enforced here rather than left to each caller's own
+   * `catch`: by this point the bytes are in the pool and the document already
+   * names them, so a cache write that fails costs a re-download and nothing
+   * else. A commit must not be reported as failed over it.
+   */
   readonly mirror: (assetId: string, placement: TPlacement) => Promise<void>;
 }
 
@@ -146,6 +166,12 @@ export interface PoolCommitPlan<TPlacement> {
  * code rather than on the client's error class is deliberate: the class is not
  * always the one this bundle imported, while the code is the part of the
  * contract that crosses every boundary.
+ *
+ * `errorCode` — the field the generation routes' own error class carries — is
+ * deliberately not read. That class is raised by the image and video API calls
+ * and never by a pool write, so accepting its shape here would widen this
+ * predicate past anything `putAsset` can throw, on a field whose values come
+ * from a different contract.
  */
 function poolRefusedForRoom(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
@@ -156,8 +182,9 @@ function poolRefusedForRoom(error: unknown): boolean {
 /**
  * Store bytes in the pool and point the document at them.
  *
- * Returns rather than throws for both refusal shapes; a write-back that fails
- * still throws, for the reason given on `writeBack`.
+ * Returns rather than throws for every refusal shape; a write-back that fails
+ * still throws, for the reason given on `writeBack`. A mirror that fails does
+ * neither: the commit already happened.
  */
 export async function commitToPool<TPlacement>(
   plan: PoolCommitPlan<TPlacement>,
@@ -182,12 +209,28 @@ export async function commitToPool<TPlacement>(
       error,
     };
     // Awaited before the outcome is reported, so `refused-retained` is a
-    // statement about what is on disk rather than about what was scheduled.
-    if (plan.retain) await plan.retain(refused);
+    // statement about what is on disk rather than about what was scheduled --
+    // and a sink that could not keep the bytes demotes the outcome, so no
+    // caller stamps a key nothing can be read back by.
+    if (plan.retain) {
+      try {
+        await plan.retain(refused);
+      } catch (retentionError) {
+        log.warn(`Could not keep the bytes refused for ${plan.slot}:`, retentionError);
+        return { status: 'failed', error: retentionError };
+      }
+    }
     return { status: 'refused-retained', code: ASSET_QUOTA_EXCEEDED, error, refused };
   }
 
   const placement = await plan.writeBack(assetId);
-  await plan.mirror(assetId, placement);
+  try {
+    await plan.mirror(assetId, placement);
+  } catch (error) {
+    // The bytes are stored and the document names them. A cache this browser
+    // could not write costs a re-download, never the media, so the commit is
+    // still a commit.
+    log.warn(`Local mirror failed for ${assetId}:`, error);
+  }
   return { status: 'stored', assetId, placement };
 }

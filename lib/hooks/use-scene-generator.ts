@@ -511,20 +511,23 @@ export async function generateAndStoreTTS(
     // which is the same contract the media pass's retained bytes have had since
     // it learned to keep them. See the caller's handling below for the other
     // half of it -- the action has to carry this key for adoption to find them.
+    //
+    // The rejection is NOT swallowed, and that is the point of awaiting it: a
+    // stamp is only safe once the bytes are somewhere that can be read back. A
+    // local table that refuses the row leaves nothing to adopt, so the commit
+    // demotes itself to `failed` and the line goes unvoiced instead of carrying
+    // a derived key that resolves to nothing for the rest of the course's life.
     retain: async () => {
-      await db.audioFiles.put(cachedNarrationRow(requestId)).catch((error: unknown) => {
-        log.warn('Could not keep refused narration for', requestId, error);
-      });
+      await db.audioFiles.put(cachedNarrationRow(requestId));
     },
     // Nothing to write back: the action this narration belongs to is not in the
     // document yet. The caller stamps it from the id returned here, which is
     // why this path has no funnel of its own to invent one.
     writeBack: async () => undefined,
-    // A cache the pool already backs: a failed write costs a re-download.
+    // A cache the pool already backs: a failed write costs a re-download, and
+    // the primitive holds that to be best-effort for every caller.
     mirror: async (assetId) => {
-      await db.audioFiles.put(cachedNarrationRow(assetId)).catch((error: unknown) => {
-        log.warn('Local narration cache write failed for', assetId, error);
-      });
+      await db.audioFiles.put(cachedNarrationRow(assetId));
     },
   });
 
@@ -541,9 +544,10 @@ export async function generateAndStoreTTS(
     );
     return requestId;
   }
-  // Storing narration failed for some other reason, and that says nothing about
-  // whether a later attempt would fit, so nothing is kept under a key a later
-  // load would take for adoptable narration. A scene whose audio cannot be
+  // Storing narration failed for some other reason -- or the bytes could not be
+  // kept -- and neither says anything about whether a later attempt would fit,
+  // so nothing is left under a key a later load would take for adoptable
+  // narration. A scene whose audio cannot be
   // stored keeps its text and leaves the line unvoiced and retryable, exactly
   // as an image that cannot be stored leaves its slide; reporting it as a TTS
   // failure would pause the whole deck at its first slide over one clip's
@@ -615,10 +619,37 @@ export async function generateTTSForScene(
   let failedCount = 0;
   let lastError: string | undefined;
   const freshAllocations: string[] = [];
+  /**
+   * Actions holding retained bytes rather than a fresh allocation.
+   *
+   * A clip the store refused for want of room comes back under its own derived
+   * key with its bytes kept in the local table. Nothing was allocated, so a
+   * rollback has nothing to reclaim -- and running one anyway would delete the
+   * only copy of audio that is already paid for and unstamp the key adoption
+   * reads it back by, which is the double billing this whole path exists to
+   * stop. A sibling line failing is not a reason to throw them away.
+   */
+  const retainedRefusals = new Set<SpeechAction>();
+  const serverBacked = isServerBackedMediaPersistence();
 
   // Scene order keeps the provider request correlation label unique. Storage
   // identity is allocated by the pool and is never derived from this value.
   const sceneOrder = scene.order;
+
+  /**
+   * Undo this scene's narration, keeping whatever a rollback cannot own.
+   *
+   * Everything in `freshAllocations` was minted for this scene and nothing else
+   * holds it, so its local copy goes. A retained refusal is the exception, and
+   * the only one.
+   */
+  const rollBackFreshNarration = async (): Promise<void> => {
+    await removeFreshTtsAllocations(freshAllocations);
+    for (const action of speechActions) {
+      if (retainedRefusals.has(action)) continue;
+      delete action.audioId;
+    }
+  };
 
   // Generate + store one action's audio. Failures are counted, not thrown, so
   // one bad clip never aborts the rest of the scene.
@@ -636,7 +667,13 @@ export async function generateTTSForScene(
       );
       if (assetId) {
         action.audioId = assetId;
-        freshAllocations.push(assetId);
+        // Under server-backed persistence the pool answers with an allocated
+        // id, so the request key coming back means one thing only: the store
+        // refused these bytes and they were kept under it. Browser-only always
+        // returns the request key and always rolls back with the scene, which
+        // is right there -- the bytes and the document share one lifetime.
+        if (serverBacked && assetId === requestId) retainedRefusals.add(action);
+        else freshAllocations.push(assetId);
       }
     } catch (error) {
       if (isAbortError(error)) throw error;
@@ -678,14 +715,12 @@ export async function generateTTSForScene(
       }
     }
   } catch (error) {
-    await removeFreshTtsAllocations(freshAllocations);
-    for (const action of speechActions) delete action.audioId;
+    await rollBackFreshNarration();
     throw error;
   }
 
   if (failedCount > 0) {
-    await removeFreshTtsAllocations(freshAllocations);
-    for (const action of speechActions) delete action.audioId;
+    await rollBackFreshNarration();
   }
 
   return {

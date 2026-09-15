@@ -132,8 +132,24 @@ function sceneWithOneLine(): Scene {
   } as unknown as Scene;
 }
 
-function audioIdOf(scene: Scene): string | undefined {
-  return (scene as unknown as { actions: Array<{ audioId?: string }> }).actions[0]?.audioId;
+/** Two lines, so "this clip" and "the one next to it" are distinguishable. */
+function sceneWithTwoLines(): Scene {
+  return {
+    id: 'scene-1',
+    stageId,
+    title: 'Scene',
+    order: 1,
+    type: 'slide',
+    content: { type: 'slide', canvas: { id: 'slide-1', elements: [] } },
+    actions: [
+      { id: 'speech-1', type: 'speech', text: 'Welcome' },
+      { id: 'speech-2', type: 'speech', text: 'And then' },
+    ],
+  } as unknown as Scene;
+}
+
+function audioIdOf(scene: Scene, index = 0): string | undefined {
+  return (scene as unknown as { actions: Array<{ audioId?: string }> }).actions[index]?.audioId;
 }
 
 /** The local audio table, modelled so one step can read what the last wrote. */
@@ -251,6 +267,75 @@ describe('narration refused for want of room', () => {
     const scene = sceneWithOneLine();
     await expect(generateTTSForScene(scene)).resolves.toEqual({ success: true, failedCount: 0 });
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  // A sibling line failing is not a reason to throw away bytes that are
+  // already paid for. The scene-level rollback reclaims what it minted for this
+  // scene; a retained refusal was never minted, and unstamping it would strand
+  // the only copy of that clip where nothing will ever look for it again.
+  it('keeps a retained refusal when the line next to it fails', async () => {
+    const rows = modelAudioTable();
+    mocks.poolPut.mockRejectedValue(quotaRefusal());
+    mockFetch.mockResolvedValueOnce(ttsResponse()).mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      statusText: 'unavailable',
+      json: async () => ({ error: 'provider down' }),
+    });
+
+    const scene = sceneWithTwoLines();
+    await expect(generateTTSForScene(scene)).resolves.toMatchObject({
+      success: false,
+      failedCount: 1,
+    });
+
+    // The refused line keeps both halves of the contract: its bytes and the
+    // key adoption reads them back by.
+    expect(audioIdOf(scene, 0)).toBe(derivedRef);
+    expect(rows.has(derivedRef)).toBe(true);
+    expect(mocks.audioDelete).not.toHaveBeenCalledWith(derivedRef);
+    // The line that failed has nothing to keep.
+    expect(audioIdOf(scene, 1)).toBeUndefined();
+  });
+
+  // A clip the pool did take is an allocation this scene minted and nothing
+  // else holds, so the rollback still reclaims its local copy.
+  it('still rolls back a clip the pool accepted when a sibling fails', async () => {
+    modelAudioTable();
+    mocks.poolPut.mockResolvedValue('ast_narration_allocated');
+    mockFetch.mockResolvedValueOnce(ttsResponse()).mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      statusText: 'unavailable',
+      json: async () => ({ error: 'provider down' }),
+    });
+
+    const scene = sceneWithTwoLines();
+    await expect(generateTTSForScene(scene)).resolves.toMatchObject({
+      success: false,
+      failedCount: 1,
+    });
+
+    expect(mocks.audioDelete).toHaveBeenCalledWith('ast_narration_allocated');
+    expect(audioIdOf(scene, 0)).toBeUndefined();
+  });
+
+  // `refused-retained` is a statement about what is on disk. If the local table
+  // refused the row too, a stamp would name bytes nothing can read back, for
+  // the rest of the course's life.
+  it('leaves the line unvoiced when the refused bytes cannot be kept locally', async () => {
+    mocks.audioPut.mockRejectedValue(new Error('local quota exceeded'));
+    mocks.poolPut.mockRejectedValue(quotaRefusal());
+    mockFetch.mockResolvedValueOnce(ttsResponse());
+
+    const scene = sceneWithOneLine();
+    await expect(generateTTSForScene(scene)).resolves.toMatchObject({
+      success: true,
+      failedCount: 0,
+    });
+
+    expect(audioIdOf(scene)).toBeUndefined();
+    expect(mocks.audioPut).toHaveBeenCalledTimes(1);
   });
 
   // A refusal for room says the bytes do not fit. Everything else -- a dropped

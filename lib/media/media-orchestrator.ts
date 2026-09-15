@@ -140,18 +140,22 @@ interface RefusedMediaBytes {
  * it is reserved for refusals a retry cannot change — a provider's content
  * decision, a disabled generation setting, and a full asset store.
  *
- * The quota refusal reaches this browser as the asset client's error, whose
- * `code` is the one the storage contract puts in the response body. Matching
- * on the code rather than on the client's error class is deliberate: the class
- * is not always the one this bundle imported, while the code is the part of
- * the contract that crosses every boundary. Everything else stays retryable,
- * because everything else might work next time.
+ * Exactly two error shapes can carry one, and each is named rather than probed
+ * for. A generation route's refusal arrives as `MediaApiError`, whose
+ * `errorCode` is the route's own; a full store arrives as the
+ * `MediaStorageRefusalError` the commit raises from the pool primitive's
+ * refusal outcome, whose `code` the primitive already matched against the
+ * storage contract. Nothing else reaching this catch classifies a pool write:
+ * the primitive owns that test now, so the structural "any object with a
+ * `code`" probe this used to end with could no longer be reached by a pool
+ * error that was not already wrapped, and a generalization nothing can take is
+ * one more shape to keep true. Everything else stays retryable, because
+ * everything else might work next time.
  */
 function mediaFailureCode(error: unknown): string | undefined {
   if (error instanceof MediaApiError) return error.errorCode;
-  if (typeof error !== 'object' || error === null) return undefined;
-  const code = (error as { code?: unknown }).code;
-  return code === ASSET_QUOTA_EXCEEDED ? ASSET_QUOTA_EXCEEDED : undefined;
+  if (error instanceof MediaStorageRefusalError) return error.code;
+  return undefined;
 }
 
 function createAbortError(): Error {
