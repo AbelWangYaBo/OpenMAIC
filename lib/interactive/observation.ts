@@ -140,29 +140,6 @@ export function parseObservation(raw: string, scopeId: string): ParsedObservatio
   }
 }
 
-/** Called by authored content on update/render, never by the collector. Replaces a data projection. */
-export function publishObservation(root: HTMLElement, observation: Observation): void {
-  try {
-    const raw = JSON.stringify(observation);
-    const parsed = parseObservation(raw, root.id);
-    if (parsed.status === 'unavailable') {
-      throw new Error(`Invalid observation publication: ${parsed.reason}`);
-    }
-    let data = root.querySelector<HTMLScriptElement>(`script[${OBSERVATION_ATTRIBUTE}]`);
-    if (!data) {
-      data = document.createElement('script');
-      data.type = 'application/json';
-      data.setAttribute(OBSERVATION_ATTRIBUTE, '');
-      root.appendChild(data);
-    }
-    data.textContent = raw;
-  } catch (error) {
-    // A failed update must never leave the previous publication available as current.
-    root.querySelectorAll(`script[${OBSERVATION_ATTRIBUTE}]`).forEach((n) => n.remove());
-    throw error;
-  }
-}
-
 /** Request results are detached and recursively frozen; future publications cannot change them. */
 export function freezeEvidence<T>(value: T): T {
   if (value && typeof value === 'object') {

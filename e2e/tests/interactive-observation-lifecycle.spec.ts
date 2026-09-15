@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 type TestWindow = Window & {
   IframeUtils: typeof import('../../lib/utils/iframe');
   Bridge: typeof import('../../lib/interactive/observation-bridge');
@@ -199,44 +200,48 @@ for (const ending of ['</BoDy   ></html>', '']) {
   });
 }
 
-const publicationBundle = buildSync({
-  entryPoints: ['lib/interactive/observation.ts'],
-  bundle: true,
-  write: false,
-  platform: 'browser',
-  format: 'iife',
-  globalName: 'Publication',
-}).outputFiles[0].text;
-for (const failure of ['cycle', 'bigint', 'schema'] as const) {
-  test(`publication ${failure} failure removes previously known state`, async ({ page }) => {
-    await page.evaluate(publicationBundle + ';window.Publication = Publication;');
-    const result = await page.evaluate(
+// Execute the publication example that is actually included in generation prompts.
+const publicationExample = readFileSync(
+  'packages/@openmaic/generation/snippets/interactive-observation.md',
+  'utf8',
+).match(/```javascript\n(function publishState[\s\S]*?)```/)![1];
+for (const failure of ['cycle', 'bigint', 'oversize', 'undefined', 'schema'] as const) {
+  test(`prompt publication ${failure} never returns previously known state`, async ({ page }) => {
+    const frame = page.frames().find((frame) => frame !== page.mainFrame())!;
+    await frame.addScriptTag({ content: publicationExample });
+    await frame.evaluate((observation) => {
+      (window as unknown as { publishState(value: unknown): void }).publishState(observation);
+    }, observation);
+    expect(await page.evaluate('session.capture()')).toMatchObject({
+      status: 'available',
+      observation: { current: { graph: { objects: [{ facts: [{ value: 7 }] }] } } },
+    });
+    const publication = await frame.evaluate(
       ({ observation, failure }) => {
-        const api = (
-          window as unknown as { Publication: typeof import('../../lib/interactive/observation') }
-        ).Publication;
-        const root = document.createElement('main');
-        root.id = 'experiment';
-        document.body.appendChild(root);
-        api.publishObservation(root, observation as Parameters<typeof api.publishObservation>[1]);
-        const before = !!root.querySelector('[data-maic-observation]');
+        const publish = (window as unknown as { publishState(value: unknown): void }).publishState;
         const invalid = structuredClone(observation) as unknown as Record<string, unknown>;
         if (failure === 'cycle') invalid.loop = invalid;
         if (failure === 'bigint') invalid.value = BigInt(1);
+        if (failure === 'oversize') invalid.value = 'x'.repeat(32769);
         if (failure === 'schema') invalid.version = 999;
         let threw = false;
         try {
-          api.publishObservation(
-            root,
-            invalid as unknown as Parameters<typeof api.publishObservation>[1],
-          );
+          publish(failure === 'undefined' ? undefined : invalid);
         } catch {
           threw = true;
         }
-        return { before, threw, after: !!root.querySelector('[data-maic-observation]') };
+        return { threw, outletPresent: !!document.querySelector('[data-maic-observation]') };
       },
       { observation, failure },
     );
-    expect(result).toEqual({ before: true, threw: true, after: false });
+    // The prompt helper handles publication failures; the actual collector owns schema validation.
+    expect(publication).toEqual({
+      threw: failure !== 'schema',
+      outletPresent: failure === 'schema',
+    });
+    expect(await page.evaluate('session.capture()')).toMatchObject({
+      status: 'unavailable',
+      reason: failure === 'schema' ? 'invalid-data' : 'no-interface',
+    });
   });
 }
