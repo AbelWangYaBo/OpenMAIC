@@ -18,6 +18,7 @@ import {
   AssetCollectionFailure,
   AssetCollector,
   AssetReferenceTrackingNotEnabledError,
+  type AssetCollectionEntryLevelFailure,
   type AssetCollectionPass,
   type AssetCollectorOptions,
 } from '../src/asset/collector.js';
@@ -621,6 +622,44 @@ describe('asset entry lifecycle with PGlite', () => {
         for (const id of ['lock-a', 'lock-b', 'lock-c']) {
           expect((await lifecycleOf(id))?.unreferenced_at).not.toBeNull();
         }
+      });
+
+      test('the lock covers what the write drops as well as what it adds, and precedes every write', async () => {
+        // One ordered statement is only a guarantee if it is complete and
+        // first. Locking the commit set and the stamp set as two sequences
+        // leaves a pair of saves whose commit set is the other's stamp set
+        // able to cycle; taking any entry lock before it -- as each scope's
+        // reference INSERT did through its foreign key -- leaves the same
+        // hole against the collector's ascending mark.
+        await entryUnder('lock-d', 'fourth');
+        await syncDocumentAssetReferences(db, {
+          stageId: 'lock-stage',
+          scope: { scope: 'scene', sceneId: 'scene-a', candidates: ['lock-d', 'lock-b'] },
+        });
+        const log: { text: string; params?: unknown[] }[] = [];
+
+        // Now name a different pair: 'lock-b' stays, 'lock-d' is dropped,
+        // 'lock-a' and 'lock-c' arrive.
+        await syncDocumentAssetReferences(recorded(log), {
+          stageId: 'lock-stage',
+          scope: { scope: 'scene', sceneId: 'scene-a', candidates: ['lock-c', 'lock-a'] },
+        });
+
+        const locks = lockStatements(log);
+        expect(locks).toHaveLength(1);
+        // The union of both halves, sorted: nothing is locked in a second
+        // sequence later on.
+        expect(locks[0]?.params?.[0]).toEqual(['lock-a', 'lock-b', 'lock-c', 'lock-d']);
+        const lockAt = log.findIndex((statement) => statement.text.includes('FOR NO KEY UPDATE'));
+        const firstWriteAt = log.findIndex(
+          (statement) =>
+            statement.text.includes('document_asset_refs') && !statement.text.startsWith('SELECT'),
+        );
+        expect(firstWriteAt).toBeGreaterThan(lockAt);
+        // And the write itself is unchanged.
+        expect((await refRows()).map((row) => row.asset_id)).toEqual(['lock-a', 'lock-c']);
+        expect((await lifecycleOf('lock-d'))?.unreferenced_at).not.toBeNull();
+        expect((await lifecycleOf('lock-b'))?.unreferenced_at).not.toBeNull();
       });
     });
   });
@@ -1557,6 +1596,52 @@ describe('asset entry lifecycle with PGlite', () => {
       // And the entry level itself did nothing: a failed walk marks nothing,
       // so invariant (i) still holds the gate shut.
       expect((await lifecycleOf('legacy-blocked'))?.committed_at).toBeNull();
+    });
+
+    test('a blob-pass failure takes precedence and carries the entry-level failure', async () => {
+      // The entry-level failure is recorded and raised after the blob pass --
+      // unless the blob pass throws too, and then it is the blob failure that
+      // stopped the pass and the entry failure would be lost. It travels on
+      // the raised error instead.
+      await legacyEntry('legacy-masked', 'legacy masked');
+      await documentStore(false).saveDocument(documentWith('stage-1', []));
+      const doomed = await store.put(PRINCIPAL, new Blob(['doomed bytes']));
+      await store.remove(PRINCIPAL, doomed);
+      await db.query(
+        `UPDATE asset_blobs SET unreferenced_at = '2000-01-01T00:00:00.000Z'
+          WHERE NOT EXISTS (
+                SELECT 1 FROM asset_entries WHERE content_hash = asset_blobs.content_hash
+              )`,
+      );
+      const failingBoth: WithTransaction = (body) =>
+        transactions(db)((queryable) =>
+          body({
+            async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+              text: string,
+              params?: unknown[],
+            ): Promise<QueryResult<TRow>> {
+              if (text.includes('document_stages')) throw new Error('injected walk failure');
+              if (text.includes('asset_blobs') && text.includes('FOR UPDATE')) {
+                throw new Error('injected blob failure');
+              }
+              return queryable.query<TRow>(text, params);
+            },
+          }),
+        );
+
+      const failure = await collector({ graceMs: 0, withTransaction: failingBoth })
+        .collectPass()
+        .catch((error: unknown) => error);
+
+      // The blob failure is what surfaced: it names no document, and its own
+      // cause is the injected blob error.
+      expect(failure).toBeInstanceOf(AssetCollectionFailure);
+      expect((failure as AssetCollectionFailure).stageId).toBeUndefined();
+      expect((failure as Error).cause).toMatchObject({ message: 'injected blob failure' });
+      // And the entry-level failure rode along rather than being dropped.
+      const carried = (failure as AssetCollectionEntryLevelFailure).entryLevelFailure;
+      expect(carried).toBeInstanceOf(AssetCollectionFailure);
+      expect((carried as AssetCollectionFailure).stageId).toBe('stage-1');
     });
 
     test('a deployment with no legacy entry never walks a document', async () => {
