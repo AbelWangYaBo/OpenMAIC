@@ -656,6 +656,91 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
     }
   });
 
+  it('keeps a valid current-Scene sample when the reference points at another Scene', async () => {
+    installAgentShell('Mock cross-scene answer.');
+    const body = runtimeBody();
+    // The student referenced a component on an earlier Scene and then moved on.
+    // The sample still describes the Scene they are on now, so it is not stale:
+    // reference and area state are independent evidence items.
+    body.storeState.scenes = [
+      {
+        id: 'scene-other',
+        stageId: 'stage-1',
+        title: 'Earlier activity',
+        order: 0,
+        type: 'interactive',
+        content: {
+          type: 'interactive',
+          widgetType: 'simulation',
+          html: '<!doctype html><input id="angle-slider" type="range" value="45">',
+        },
+      },
+      body.storeState.scenes[0],
+    ];
+    body.elementReference = {
+      kind: 'interactive_component',
+      sceneId: 'scene-other',
+      selector: '#angle-slider',
+    };
+    const { POST } = await import('@/app/api/chat/pi/route');
+    const response = await POST(makeRequest(body));
+    await response.text();
+    expect(response.status).toBe(200);
+    const prompts = mocks.legacyChildPrompts.join('\n');
+    expect(prompts).not.toContain('stale-sample');
+    expect(prompts).toContain('"value":1400');
+    // Both identities must stay legible once the two can disagree on Scene.
+    expect(prompts).toContain('#angle-slider');
+    expect(prompts).toContain('come from different Scenes');
+  });
+
+  it.each([
+    ['a referenced component', true],
+    ['an unreferenced send', false],
+  ])('degrades oversized state to an explicit unavailable statement for %s', async (_n, refer) => {
+    installAgentShell('Mock oversized answer.');
+    const body = runtimeBody();
+    if (!refer) delete (body as { elementReference?: unknown }).elementReference;
+    // Legal content the schema accepts: `<` is allowed in a label and in a fact
+    // value, and escaping it for the prompt expands one code point into six.
+    const objects = Array.from({ length: 18 }, (_, i) => ({
+      id: `object-${i}`,
+      label: '<'.repeat(240),
+      facts: [{ key: 'k', label: 'K', status: 'known', value: '<'.repeat(300) }],
+    }));
+    const graph = {
+      objects,
+      relations: {
+        status: 'complete',
+        items: [{ from: 'object-0', to: 'object-1', kind: 'link', label: 'A to B' }],
+      },
+      missing: [] as string[],
+    };
+    const observation = body.interactiveState.snapshot.observation as unknown as {
+      current: { graph: unknown };
+      rendered: { graph: unknown };
+    };
+    observation.current.graph = graph;
+    observation.rendered.graph = graph;
+    // The observation stays inside the Host's 32,768-byte input cap, so this is a
+    // packet the Host accepts; only the escaped assembly downstream would have
+    // exceeded the output budget.
+    expect(
+      Buffer.byteLength(JSON.stringify(body.interactiveState.snapshot.observation), 'utf8'),
+    ).toBeLessThan(32768);
+    const { POST } = await import('@/app/api/chat/pi/route');
+    const response = await POST(makeRequest(body));
+    await response.text();
+    expect(response.status).toBe(200);
+    const prompts = mocks.legacyChildPrompts.join('\n');
+    expect(prompts).toContain('too-large');
+    // Not truncated: no fragment of the oversized body survives.
+    expect(prompts).not.toContain('object-399');
+    // The relationship prose degrades with the body it describes.
+    expect(prompts).toContain('Current relationship evidence is unavailable');
+    expect(prompts).not.toContain('Current relationship evidence is COMPLETE');
+  });
+
   it('rejects interactive state attached to a slide element reference', async () => {
     const body = runtimeBody() as Record<string, unknown>;
     body.elementReference = { kind: 'slide_element', sceneId: 'scene-1', elementId: 'element-1' };
