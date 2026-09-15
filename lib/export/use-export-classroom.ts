@@ -130,10 +130,11 @@ export async function buildClassroomExportZip(
     // 6b. Fetch legacy audio URLs that no local row backs. An unconverted
     // document can carry narration only as an audioUrl; the field itself
     // never enters the manifest, so its bytes must.
-    const { audioUrlToPath, blobs: legacyAudioBlobs } = await collectLegacyAudioForExport(
-      exportScenes,
-      audioIdToPath,
-    );
+    const {
+      audioUrlToPath,
+      blobs: legacyAudioBlobs,
+      fullyRescuedAudioIds,
+    } = await collectLegacyAudioForExport(exportScenes, audioIdToPath);
 
     // 7. Build manifest
     const manifestStage: ManifestStage = {
@@ -203,7 +204,7 @@ export async function buildClassroomExportZip(
     // Legacy audioUrl-only narration is outside the standardized manifest and
     // is handled by collectLegacyAudioForExport above.
     for (const [index, entry] of audioEntries.entries()) {
-      if (!audioIdToPath.has(entry.ref)) {
+      if (!audioIdToPath.has(entry.ref) && !fullyRescuedAudioIds.has(entry.ref)) {
         missingAudioCount += 1;
         mediaIndexEntries.push([
           audioArchivePath(index, 'mp3'),

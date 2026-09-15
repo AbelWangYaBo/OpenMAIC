@@ -288,7 +288,7 @@ describe('createVideoTimelineDeps — legacy URL audio fallback', () => {
     expect(deps.assets.audio(action as never)).toBeNull();
   });
 
-  it('retains an evicted speech row so collection reaches its CDN fallback', async () => {
+  it('keeps failed shared resolution missing and prevents a later CDN retry', async () => {
     const audioId = 'ast_evicted_speech';
     const ossKey = 'https://cdn.example/evicted.mp3';
     const action = { id: 'a1', type: 'speech', text: 'Hello', audioId };
@@ -309,21 +309,21 @@ describe('createVideoTimelineDeps — legacy URL audio fallback', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     const deps = await createVideoTimelineDeps({ stage: { id: STAGE_ID }, scenes: [scene] });
-    expect(deps.records.audioById.get(audioId)).toBe(row);
-    expect(deps.assets.audio(action as never)).toMatchObject({ present: true, durationMs: 3250 });
+    expect(deps.records.audioById.has(audioId)).toBe(false);
+    expect(deps.assets.audio(action as never)).toEqual({ id: audioId, present: false });
+    expect(deps.timing.audioDurationMs(action as never)).toBeNull();
 
-    const result = await collectVideoAssets(
-      {
-        assets: {
-          entries: [{ assetId: audioId, kind: 'audio', path: 'audio/evicted.mp3', present: true }],
-        },
-      } as never,
-      [scene],
-      deps.records,
+    const ir = compileVideoTimeline(
+      { stage: { id: STAGE_ID, name: 'Missing narration' }, scenes: [scene] },
+      deps,
     );
-    expect(fetchSpy).toHaveBeenCalledWith(ossKey);
-    expect(await result.blobs.get('audio/evicted.mp3')?.text()).toBe('cdn-speech');
-    expect(result.missing).toEqual([]);
+    expect(ir.assets.entries).toContainEqual(
+      expect.objectContaining({ assetId: audioId, kind: 'audio', present: false }),
+    );
+    const result = await collectVideoAssets(ir, [scene], deps.records);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect([...result.blobs.values()].some((blob) => blob.type === 'audio/mpeg')).toBe(false);
+    expect(result.missing.some((path) => path.startsWith('audio/'))).toBe(false);
   });
 
   it('round-trips one opaque ref as speech audio and later video media', async () => {
@@ -345,7 +345,10 @@ describe('createVideoTimelineDeps — legacy URL audio fallback', () => {
       createdAt: 0,
     };
     audioGet.mockResolvedValue(audioRow);
-    resolveAudioBlobMock.mockResolvedValue(null);
+    resolveAudioBlobMock.mockResolvedValue(new Blob(['speech-bytes'], { type: 'audio/mpeg' }));
+    vi.stubGlobal('document', { createElement: () => fakeAudioElement(1) });
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:cross-kind-probe');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
     seedMedia(
       videoRecordFor(sharedRef, {
         blob: new Blob([], { type: 'video/mp4' }),
@@ -372,10 +375,22 @@ describe('createVideoTimelineDeps — legacy URL audio fallback', () => {
     expect(deps.records.mediaByElementId.has(sharedRef)).toBe(true);
 
     const ir = compileVideoTimeline({ stage: { id: STAGE_ID, name: 'Cross kind' }, scenes }, deps);
-    const result = await collectVideoAssets(ir, scenes, deps.records);
+    const result = await collectVideoAssets(
+      {
+        ...ir,
+        assets: {
+          ...ir.assets,
+          entries: ir.assets.entries.filter((entry) => entry.kind !== 'frame'),
+        },
+      },
+      scenes,
+      deps.records,
+    );
     expect([...result.blobs.values()].some((blob) => blob.type === 'audio/mpeg')).toBe(true);
     expect([...result.blobs.values()].some((blob) => blob.type === 'video/mp4')).toBe(true);
     expect(fetchSpy).toHaveBeenCalledWith('https://cdn.example/shared.mp4');
+
+    vi.unstubAllGlobals();
   });
 });
 

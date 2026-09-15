@@ -1,7 +1,7 @@
 import type { Action, DiscussionAction, SpeechAction } from '@/lib/types/action';
 import type { ManifestAction, MediaIndexEntry } from './classroom-zip-types';
 import { db, mediaFileKey } from '@/lib/utils/database';
-import type { AssetManifestEntry } from '@openmaic/dsl';
+import { isSlideContent, slideMediaSlotDescriptors, type AssetManifestEntry } from '@openmaic/dsl';
 import type { AudioFileRecord, MediaFileRecord } from '@/lib/utils/database';
 import type { Scene } from '@/lib/types/stage';
 import { resolveAudioBlob } from '@/lib/media/resolve-audio-bytes';
@@ -264,20 +264,45 @@ export function legacyAudioMediaIndexEntry(file: LegacyAudioBlob): MediaIndexEnt
 export async function collectLegacyAudioForExport(
   scenes: readonly Scene[],
   audioIdToPath: Map<string, string>,
-): Promise<{ audioUrlToPath: Map<string, string>; blobs: LegacyAudioBlob[] }> {
+): Promise<{
+  audioUrlToPath: Map<string, string>;
+  blobs: LegacyAudioBlob[];
+  /** Missing stable ids for which every audio owner was rescued by a legacy URL. */
+  fullyRescuedAudioIds: Set<string>;
+}> {
   const uniqueLegacyUrls = new Set<string>();
+  const audioOwnerCounts = new Map<string, number>();
+  const rescuedOwnerCountsByUrl = new Map<string, Map<string, number>>();
+  const countAudioOwner = (audioId: string) =>
+    audioOwnerCounts.set(audioId, (audioOwnerCounts.get(audioId) ?? 0) + 1);
   for (const scene of scenes) {
+    const slides = [
+      ...(isSlideContent(scene.content) ? [scene.content.canvas] : []),
+      ...(scene.whiteboards ?? []),
+    ];
+    for (const slide of slides) {
+      for (const slot of slideMediaSlotDescriptors(slide)) {
+        if (slot.kind === 'audio-src' && slot.ref) countAudioOwner(slot.ref);
+      }
+    }
     for (const action of scene.actions ?? []) {
       if (action.type !== 'speech') continue;
+      const stampedId = (action as SpeechAction).audioId;
+      if (stampedId) countAudioOwner(stampedId);
       const legacyUrl = (action as { audioUrl?: string }).audioUrl;
       if (!legacyUrl) continue;
-      const stampedId = (action as SpeechAction).audioId;
       if (stampedId && audioIdToPath.has(stampedId)) continue;
       uniqueLegacyUrls.add(legacyUrl);
+      if (stampedId) {
+        const ownerCounts = rescuedOwnerCountsByUrl.get(legacyUrl) ?? new Map<string, number>();
+        ownerCounts.set(stampedId, (ownerCounts.get(stampedId) ?? 0) + 1);
+        rescuedOwnerCountsByUrl.set(legacyUrl, ownerCounts);
+      }
     }
   }
   const blobs: LegacyAudioBlob[] = [];
   const audioUrlToPath = new Map<string, string>();
+  const rescuedAudioOwnerCounts = new Map<string, number>();
   const fetched = await mapWithConcurrency([...uniqueLegacyUrls], 4, async (url) => {
     try {
       const response = await fetchMediaUrl(url, 15_000);
@@ -299,9 +324,20 @@ export async function collectLegacyAudioForExport(
     const format = canonical.extension;
     const zipPath = legacyAudioArchivePath(blobs.length, format);
     audioUrlToPath.set(url, zipPath);
+    for (const [audioId, ownerCount] of rescuedOwnerCountsByUrl.get(url) ?? []) {
+      rescuedAudioOwnerCounts.set(
+        audioId,
+        (rescuedAudioOwnerCounts.get(audioId) ?? 0) + ownerCount,
+      );
+    }
     blobs.push({ zipPath, blob, format, mimeType: canonical.mimeType, sourceRef: url });
   }
-  return { audioUrlToPath, blobs };
+  const fullyRescuedAudioIds = new Set(
+    [...rescuedAudioOwnerCounts].flatMap(([audioId, rescuedCount]) =>
+      rescuedCount === audioOwnerCounts.get(audioId) ? [audioId] : [],
+    ),
+  );
+  return { audioUrlToPath, blobs, fullyRescuedAudioIds };
 }
 
 export function actionsToManifest(
