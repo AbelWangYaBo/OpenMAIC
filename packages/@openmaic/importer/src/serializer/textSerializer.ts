@@ -68,7 +68,7 @@ const WINGDINGS: Record<number, string> = {
   0xd5: '✉',
   0xd6: '☛',
   0xd7: '☞',
-  0xd8: '✌',
+  0xd8: '➢',
   0xfb: '⚫',
 };
 
@@ -247,6 +247,7 @@ interface MergedParagraphStyle {
    *  items / titles positioned to the right of an icon). Without them we fall back to the
    *  OOXML default 96px tab grid, which pushes tabbed text far past its intended column. */
   tabStopsPx?: number[];
+  defaultTabSizePx?: number;
 }
 
 function buildMergedParagraphStyle(
@@ -305,6 +306,11 @@ function buildMergedParagraphStyle(
 
 function mergeParagraphProps(target: MergedParagraphStyle, pPr: SafeXmlNode): void {
   if (!pPr.exists()) return;
+
+  const defaultTabSize = pPr.numAttr('defTabSz');
+  if (defaultTabSize !== undefined && defaultTabSize > 0) {
+    target.defaultTabSizePx = emuToPx(defaultTabSize);
+  }
 
   const algn = pPr.attr('algn');
   if (algn) target.align = algn;
@@ -1265,7 +1271,12 @@ export function renderTextBody(
         (n, r) => n + (r.text ? (r.text.match(/\t/g)?.length ?? 0) : 0),
         0,
       );
-      if (totalTabs - leadingFoldedTabs > 0) {
+      const useCustomTabColumns =
+        !!merged.tabStopsPx?.length &&
+        totalTabs > leadingFoldedTabs &&
+        // Formula layout cannot be measured with plain-text canvas metrics.
+        !paragraph.runs.some((run) => run.ommlXml);
+      if (totalTabs - leadingFoldedTabs > 0 && !useCustomTabColumns) {
         paraCssParts.push(`tab-size: ${resolveTabPx().toFixed(2)}px`);
       }
       if (noWrap) {
@@ -1445,6 +1456,39 @@ export function renderTextBody(
       let prevStyleStr: string | null = null;
       let prevIsLink = false;
       let accumulatedText = '';
+      let tabCursorPx = (finalMarginLeftPx ?? 0) + (merged.textIndent ?? 0);
+      // Use actual browser font metrics to decide which stop follows the text.
+      // The output contains fixed column widths, so consumers need no tab support.
+      const tabMeasure =
+        useCustomTabColumns && typeof OffscreenCanvas !== 'undefined'
+          ? new OffscreenCanvas(1, 1).getContext('2d')
+          : null;
+      const measureTabText = (text: string, paintStyle: string): number => {
+        // Read the same resolved CSS we emit, including table overrides and caps.
+        const sizePx =
+          (Number(paintStyle.match(/font-size: ([\d.]+)pt/)?.[1] ?? effectiveFontSize) * 4) / 3;
+        const spacingPx =
+          (Number(paintStyle.match(/letter-spacing: (-?[\d.]+)pt/)?.[1] ?? 0) * 4) / 3;
+        if (paintStyle.includes('text-transform: uppercase')) text = text.toUpperCase();
+        let width: number;
+        if (tabMeasure) {
+          const family = paintStyle.match(/font-family: ([^;]+)/)?.[1] ?? 'Arial';
+          const italic = paintStyle.includes('font-style: italic') ? 'italic ' : '';
+          const bold = paintStyle.includes('font-weight: bold') ? 'bold ' : '';
+          const caps = paintStyle.includes('font-variant: small-caps') ? 'small-caps ' : '';
+          tabMeasure.font = `${italic}${caps}${bold}${sizePx}px ${family}`;
+          tabMeasure.fontKerning = paintStyle.includes('font-kerning: none') ? 'none' : 'normal';
+          width = tabMeasure.measureText(text).width;
+        } else {
+          // Deterministic fallback for server-side imports without a canvas.
+          width = Array.from(text).reduce(
+            (sum, char) =>
+              sum + (char === ' ' ? 0.25 : char.charCodeAt(0) > 255 ? 1 : 0.5) * sizePx,
+            0,
+          );
+        }
+        return width + Array.from(text).length * spacingPx;
+      };
 
       const flushAccumulatedRun = () => {
         if (!accumulatedText || prevStyleStr === null) return;
@@ -1495,6 +1539,7 @@ export function renderTextBody(
           continue;
         }
         if (run.text === '\n') {
+          tabCursorPx = finalMarginLeftPx ?? 0;
           flushAccumulatedRun();
           prevStyleStr = null;
           if (useLineWrappers) {
@@ -1578,6 +1623,42 @@ export function renderTextBody(
 
         const styleStr = runStylesToCssString(runStyle, run, options, ctx) + tabStyleSuffix;
         const isLink = !!runStyle.hlinkClick;
+
+        if (useCustomTabColumns) {
+          flushAccumulatedRun();
+          prevStyleStr = null;
+          const paintStyle = runStylesToCssString(runStyle, run, options, ctx);
+          const paint = (text: string) =>
+            isLink
+              ? `<a href="${escapeHtmlAttr(runStyle.hlinkClick!)}" target="_blank" rel="noopener noreferrer" style="${paintStyle}">${formatRunTextForHtml(text)}</a>`
+              : `<span style="${paintStyle}">${formatRunTextForHtml(text)}</span>`;
+          const lines = runText.split('\n');
+          for (let line = 0; line < lines.length; line++) {
+            if (line > 0) {
+              html += '<br/>';
+              tabCursorPx = finalMarginLeftPx ?? 0;
+            }
+            const parts = lines[line].split('\t');
+            for (let part = 0; part < parts.length; part++) {
+              const text = parts[part];
+              const textEndPx = tabCursorPx + measureTabText(text, paintStyle);
+              if (part < parts.length - 1) {
+                const grid = merged.defaultTabSizePx ?? 96;
+                const stop =
+                  merged.tabStopsPx!.find((pos) => pos > textEndPx + 0.01) ??
+                  (Math.floor((textEndPx + 0.01) / grid) + 1) * grid;
+                const widthPt = ((stop - tabCursorPx) * 3) / 4;
+                html += `<span style="display:inline-block;width:${widthPt.toFixed(2)}pt;text-indent:0;white-space:pre;">${text ? paint(text) : ''}</span>`;
+                tabCursorPx = stop;
+              } else if (text) {
+                html += paint(text);
+                tabCursorPx = textEndPx;
+              }
+            }
+          }
+          prevIsLink = false;
+          continue;
+        }
 
         if (isLink) {
           flushAccumulatedRun();

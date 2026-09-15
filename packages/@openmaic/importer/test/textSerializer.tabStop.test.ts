@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { renderTxBodyHtml } from './helpers';
 
 /**
@@ -24,4 +24,79 @@ describe('textSerializer · 行首 tab + tabLst 折叠成 margin-left', () => {
     expect(html).toMatch(/>物资管理</);
     expect(html).not.toContain('\t物资管理');
   });
+});
+
+describe('textSerializer · inline custom tab columns', () => {
+  const stops =
+    '<a:tabLst><a:tab pos="1317625"/><a:tab pos="2639060"/><a:tab pos="3956685"/></a:tabLst>';
+
+  it('uses the default grid after the last explicit stop instead of repeating the first stop', () => {
+    const html = renderTxBodyHtml(
+      `<a:p><a:pPr>${stops}</a:pPr><a:r><a:rPr sz="2800" spc="300"/><a:t>A.4\t\tB.0\t\t\tC.2\t\t\tD.6</a:t></a:r></a:p>`,
+    );
+    // B, C and D start at 277.066, 576 and 864 CSS px respectively.
+    const widths = [...html.matchAll(/display:inline-block;width:([\d.]+)pt/g)].map(
+      (m) => (Number(m[1]) * 4) / 3,
+    );
+    expect(widths.length).toBe(8);
+    expect(widths.reduce((a, b) => a + b, 0)).toBeCloseTo(864, 1);
+    expect(html).not.toContain('\t');
+    expect(html).toContain('D.6');
+  });
+
+  it('keeps irregular explicit stops, inherited default tab size and run styling', () => {
+    const html = renderTxBodyHtml(
+      `<a:lstStyle><a:lvl1pPr defTabSz="457200"/></a:lstStyle><a:p><a:pPr><a:tabLst><a:tab pos="952500"/><a:tab pos="2381250"/></a:tabLst></a:pPr><a:r><a:rPr sz="1000"/><a:t>A\tB\t</a:t></a:r><a:r><a:rPr sz="1000"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:rPr><a:t>C\tD</a:t></a:r></a:p>`,
+    );
+    expect(html).toContain('width:75.00pt');
+    expect(html).toContain('width:112.50pt');
+    expect(html).toContain('width:28.50pt');
+    expect(html).toContain('color: #FF0000');
+  });
+});
+
+describe('textSerializer · tab measurement matches painted styles', () => {
+  it('measures table font overrides and uppercase before choosing a stop', () => {
+    const measured: { text: string; font: string }[] = [];
+    vi.stubGlobal(
+      'OffscreenCanvas',
+      class {
+        getContext() {
+          return {
+            font: '',
+            measureText(text: string) {
+              measured.push({ text, font: this.font });
+              return {
+                width:
+                  text === 'AB' && this.font.includes('bold') && this.font.includes('Courier')
+                    ? 110
+                    : 40,
+              };
+            },
+          };
+        }
+      },
+    );
+    try {
+      const html = renderTxBodyHtml(
+        `<a:lstStyle><a:lvl1pPr><a:defRPr><a:latin typeface="Arial"/></a:defRPr></a:lvl1pPr></a:lstStyle><a:p><a:pPr><a:tabLst><a:tab pos="952500"/><a:tab pos="1905000"/></a:tabLst></a:pPr><a:r><a:rPr sz="1000" cap="all"/><a:t>ab\tC</a:t></a:r></a:p>`,
+        undefined,
+        { cellTextFontFamily: 'Courier', cellTextBold: true },
+      );
+      expect(measured[0].text).toBe('AB');
+      expect(measured[0].font).toContain('bold');
+      expect(measured[0].font).toContain('Courier');
+      expect(html).toContain('width:150.00pt');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+it('keeps native tab layout for inline math whose rendered width is not a text metric', () => {
+  const html = renderTxBodyHtml(
+    `<a:p><a:pPr><a:tabLst><a:tab pos="952500"/></a:tabLst></a:pPr><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>x</m:t></m:r></m:oMath><a:r><a:rPr sz="1200"/><a:t>\tB</a:t></a:r></a:p>`,
+  );
+  expect(html).toContain('tab-size:');
+  expect(html).not.toContain('display:inline-block;width:');
 });
