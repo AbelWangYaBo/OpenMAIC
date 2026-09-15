@@ -6,6 +6,7 @@ import {
   withObservationResponder,
 } from '@/lib/interactive/observation-bridge';
 import { createPortal } from 'react-dom';
+import { supportsInteractiveObservation } from '@/lib/interactive/observation';
 import { useWidgetIframeStore } from '@/lib/store/widget-iframe';
 import {
   useInteractiveIframePool,
@@ -237,6 +238,8 @@ function PooledIframe({
   const { t } = useI18n();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const observation = useMemo(() => {
+    if (!entry.srcDoc?.includes('data-maic-observation') || !supportsInteractiveObservation())
+      return { html: entry.srcDoc, identity: undefined };
     const identity = { sceneId, scopeId: 'experiment', documentId: crypto.randomUUID() };
     return {
       identity,
@@ -434,7 +437,7 @@ function PooledIframe({
         onLoad={() => {
           observationSession.current?.dispose();
           observationSession.current =
-            iframeRef.current && entry.srcDoc?.includes('data-maic-observation')
+            iframeRef.current && observation.identity
               ? createObservationSession(iframeRef.current, observation.identity)
               : null;
         }}

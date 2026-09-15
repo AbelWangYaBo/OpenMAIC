@@ -371,6 +371,22 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
     },
   );
 
+  it('keeps static references accepted when browser runtime sampling is unsupported', async () => {
+    installAgentShell('Current runtime state is unavailable.');
+    const { interactiveState: _unused, ...body } = runtimeBody();
+    const { POST } = await import('@/app/api/chat/pi/route');
+    const response = await POST(makeRequest(body));
+    expect(response.status).toBe(200);
+    expect(response.headers.get('X-OpenMAIC-Element-Reference-Accepted')).toBe('1');
+    await response.text();
+    for (const prompt of [mocks.directorPrompts.join('\n'), mocks.legacyChildPrompts.join('\n')]) {
+      const packet = JSON.parse(
+        prompt.match(/<page_reported_state>\n([\s\S]*?)\n<\/page_reported_state>/)![1],
+      );
+      expect(packet).toEqual({ status: 'unavailable', reason: 'no-interface' });
+    }
+  });
+
   it('drops stale runtime facts instead of using defaults or older snapshots', async () => {
     installAgentShell('Mock unknown answer.');
     const body = runtimeBody();
@@ -482,7 +498,7 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
           );
           expect(prompt).toContain('correct a conflicting delegation');
           const packet = JSON.parse(
-            prompt.match(/<page_reported_state>\n(.*?)\n<\/page_reported_state>/s)![1],
+            prompt.match(/<page_reported_state>\n([\s\S]*?)\n<\/page_reported_state>/)![1],
           );
           expect(packet.observation).toEqual(observation);
           if (c.name === 'unknown') {

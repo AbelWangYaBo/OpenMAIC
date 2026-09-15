@@ -1,6 +1,6 @@
 import type { ElementReference } from '@/lib/types/chat';
 import { useWidgetIframeStore } from '@/lib/store/widget-iframe';
-import { freezeEvidence } from './observation';
+import { freezeEvidence, supportsInteractiveObservation } from './observation';
 import type { ObservationSnapshot } from './observation-bridge';
 
 export interface InteractiveStateEvidence {
@@ -15,6 +15,9 @@ export async function sampleInteractiveReference(
   signal: AbortSignal,
 ): Promise<InteractiveStateEvidence | undefined> {
   if (reference?.kind !== 'interactive_component') return undefined;
+  if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+  // An absent packet is explicitly unavailable at the Host; static identity still travels.
+  if (!supportsInteractiveObservation()) return undefined;
   const scene = storeState.scenes.find(
     (value): value is { id: string; content: unknown } =>
       !!value &&
@@ -32,7 +35,13 @@ export async function sampleInteractiveReference(
   )
     return undefined;
   const sourceHtml = content.html;
-  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(sourceHtml));
+  let hash: ArrayBuffer;
+  try {
+    hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(sourceHtml));
+  } catch {
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    return undefined;
+  }
   const sourceHtmlHash = Array.from(new Uint8Array(hash), (b) =>
     b.toString(16).padStart(2, '0'),
   ).join('');

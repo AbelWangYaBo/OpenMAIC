@@ -4,6 +4,14 @@ import { z } from 'zod';
 export const OBSERVATION_VERSION = 1;
 export const OBSERVATION_MAX_BYTES = 32_768;
 export const OBSERVATION_ATTRIBUTE = 'data-maic-observation';
+/** Optional browser capability; unsupported contexts retain static references. */
+export function supportsInteractiveObservation(): boolean {
+  return (
+    typeof globalThis.crypto?.randomUUID === 'function' &&
+    typeof globalThis.crypto?.subtle?.digest === 'function'
+  );
+}
+
 const id = z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,126}$/);
 const text = z.string().min(1).max(240);
 const revision = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);

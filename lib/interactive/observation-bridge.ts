@@ -1,6 +1,7 @@
 import { injectIntoDocumentBodyEnd } from '../utils/html-document';
 import {
   parseObservation,
+  supportsInteractiveObservation,
   freezeEvidence,
   type ParsedObservation,
   type UnavailableReason,
@@ -36,6 +37,7 @@ export function installObservationResponder(identity: ObservationIdentity): () =
   const RESULT = 'maic:observation:result:v1';
   const OBSERVATION_ATTRIBUTE = 'data-maic-observation';
   const OBSERVATION_MAX_BYTES = 32768;
+  if (typeof globalThis.crypto?.randomUUID !== 'function') return () => {};
   const instanceId = crypto.randomUUID();
   const roots = document.querySelectorAll(`#${CSS.escape(identity.scopeId)}`);
   const root = roots.length === 1 ? roots[0] : null;
@@ -145,6 +147,7 @@ export function createObservationSession(iframe: HTMLIFrameElement, identity: Ob
       if (disposed || !iframe.isConnected || !iframe.contentWindow)
         return Promise.resolve(unavailable('document-changed'));
       if (signal?.aborted) return Promise.resolve(unavailable('cancelled'));
+      if (!supportsInteractiveObservation()) return Promise.resolve(unavailable('not-ready'));
       const source = iframe.contentWindow;
       const requestId = crypto.randomUUID();
       return new Promise((resolve) => {

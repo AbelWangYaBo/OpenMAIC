@@ -1,10 +1,14 @@
-import { it, expect, afterEach } from 'vitest';
+import { it, expect, afterEach, vi } from 'vitest';
 import { sampleInteractiveReference } from '@/lib/interactive/chat-observation';
 import { useWidgetIframeStore } from '@/lib/store/widget-iframe';
 const source = '<main id="experiment"><script data-maic-observation></script></main>';
 const reference = { kind: 'interactive_component' as const, sceneId: 's', selector: '#experiment' };
 const store = { currentSceneId: 's', scenes: [{ id: 's', content: { html: source } }] };
-afterEach(() => useWidgetIframeStore.setState({ captureByScene: {} }));
+afterEach(() => {
+  useWidgetIframeStore.setState({ captureByScene: {} });
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 it('captures only at send and freezes detached request evidence', async () => {
   let calls = 0;
   useWidgetIframeStore.getState().registerObservation('s', async (html) => {
@@ -48,4 +52,26 @@ it('unmounted or changed documents never reuse previous evidence', async () => {
   expect(
     (await sampleInteractiveReference(reference, store, new AbortController().signal))?.snapshot,
   ).toMatchObject({ status: 'unavailable', reason: 'document-changed' });
+});
+
+it.each(['missing-uuid', 'missing-digest'] as const)(
+  'omits runtime packets on %s without blocking static references',
+  async (kind) => {
+    const capture = vi.fn();
+    useWidgetIframeStore.getState().registerObservation('s', capture);
+    vi.stubGlobal(
+      'crypto',
+      kind === 'missing-uuid' ? { subtle: crypto.subtle } : { randomUUID: () => 'unused' },
+    );
+    expect(
+      await sampleInteractiveReference(reference, store, new AbortController().signal),
+    ).toBeUndefined();
+    expect(capture).not.toHaveBeenCalled();
+  },
+);
+it('omits runtime evidence when the browser rejects hashing', async () => {
+  vi.spyOn(crypto.subtle, 'digest').mockRejectedValue(new Error('Unavailable'));
+  expect(
+    await sampleInteractiveReference(reference, store, new AbortController().signal),
+  ).toBeUndefined();
 });
