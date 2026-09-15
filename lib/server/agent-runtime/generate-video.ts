@@ -27,7 +27,7 @@ import {
   MAX_REMOTE_IMAGE_BYTES,
   readResponseBodyWithLimit,
 } from '@/lib/server/bounded-download';
-import { mayNameAPoolAsset } from '@/lib/media/media-placeholder';
+import { isGeneratedMediaPlaceholder } from '@/lib/media/media-ref';
 import {
   AssetStorageFullError,
   storeGeneratedAssetOrThrow,
@@ -112,17 +112,6 @@ type PersistGeneratedVideo = (input: PersistVideoInput) => Promise<PersistedVide
 
 /** The stored ids the completion patch writes onto the element. */
 type PersistedMedia = Pick<PersistedVideo, 'src' | 'poster'>;
-
-/**
- * Whether a document value is an id the asset pool allocated.
- *
- * A plain boolean rather than the imported type predicate: narrowing a value
- * already known to be a string to `string` leaves `never` on the other branch,
- * and the checks after this one still have work to do on it.
- */
-function isAllocatedAssetId(value: string): boolean {
-  return mayNameAPoolAsset(value);
-}
 
 export interface GenerateVideoToolDeps extends Pick<CourseToolDeps, 'sessionId' | 'abortSignal'> {
   /**
@@ -369,17 +358,27 @@ async function emitMediaReadyFrame(
 }
 
 /**
- * Swap a video placeholder for the stored asset ids on the stored document:
- * every slide video element whose `mediaRef` or `src` still equals the
- * placeholder gets the allocated video id, and the poster id when there is
- * one. This `putScene` is also the write that commits both allocations and
- * records their rows in `document_asset_refs` — the store does that inside the
- * write's own transaction, so there is no reference bookkeeping here. Same
- * mutation discipline as the generation tools
- * (`runStageMutation` + putScene). When no element
- * references the placeholder anymore — the agent or the user changed or
- * removed it meanwhile — the patch is skipped silently; the completion event
- * still carries the src.
+ * Swap a video placeholder for the stored asset ids on the stored document.
+ *
+ * THE BINDING MOVES WITH THE BYTES. Every slot that holds the placeholder is
+ * rewritten, `mediaRef` included, exactly as the classic chain's
+ * `rewriteSlideMediaReference` does. This is not cosmetic: every resolver
+ * reads `mediaRef` first — `getVideoMediaRefForElement`
+ * (`lib/media/video-manifest.ts:23`), then `sourceRef = concreteSrc ?? mediaRef
+ * ?? src` (`lib/media/media-task-resolution.ts:127`), and
+ * `poolLeasableSlideRefs` leases only that `sourceRef`. An allocated id in
+ * `src` is not a concrete address, so leaving `mediaRef` on `gen_vid_…` would
+ * leave the pool never asked about the id, and the documented flow (the tool
+ * tells the model to put the ref on `mediaRef`) would store, reference and
+ * commit a video that never renders — live or after reload.
+ *
+ * This `putScene` is also the write that commits both allocations and records
+ * their rows in `document_asset_refs` — the store does that inside the write's
+ * own transaction, so there is no reference bookkeeping here. Same mutation
+ * discipline as the generation tools (`runStageMutation` + putScene). When no
+ * element references the placeholder anymore — the agent or the user changed
+ * or removed it meanwhile — the patch is skipped silently; the completion
+ * event still carries the src.
  *
  * Each candidate scene is re-read immediately before its write: the job runs
  * minutes after the tool call, exactly when the user or a resumed run may be
@@ -396,28 +395,36 @@ export async function patchStageVideoPlaceholder(
 ): Promise<number> {
   const doc = await store.loadDocument(stageId);
   if (!doc) return 0;
-  // A previously generated src of THIS stage (regeneration: the agent
-  // re-pointed mediaRef at a new job while the element still carries the
-  // last generated video, which would otherwise keep rendering it). Both
-  // the relative form the legacy local-disk flow wrote and the absolute form
-  // the classic pipeline persists are recognized; scoped to the stage's own
+  // A `src` this patch may overwrite: the placeholder itself, nothing at all,
+  // or a previously generated src of THIS stage (regeneration through the
+  // legacy local-disk shape, in both the relative form that flow wrote and the
+  // absolute form the classic pipeline persists). Scoped to the stage's own
   // media root so a user's pick copied from another stage is preserved.
+  //
+  // An allocated `ast_` id is deliberately NOT replaceable. It is a concrete
+  // choice — a pick from the shared library, or the previous generation — and
+  // the pre-#1522 rule preserved exactly such a value. Regeneration still
+  // works without overwriting it: `mediaRef` below takes the new id, and
+  // `sourceRef = concreteSrc ?? mediaRef ?? src` prefers `mediaRef` over a
+  // non-concrete `src`, so the new video is what renders.
   const generatedPrefix = `/api/classroom-media/${stageId}/`;
   const isReplaceableSrc = (value: unknown): boolean => {
     if (value === undefined || value === '' || value === ref) return true;
     if (typeof value !== 'string') return false;
-    // An allocated id is what this flow writes now, and an id carries no stage
-    // in its shape, so the per-stage scoping above has nothing to read. What
-    // stands in for it is the binding: this element names THIS job through
-    // `mediaRef`, which is the agent re-pointing it at a new generation, and
-    // the previous generation's id is what it is replacing.
-    if (isAllocatedAssetId(value)) return true;
     if (value.startsWith(generatedPrefix)) return true;
     try {
       return new URL(value).pathname.startsWith(generatedPrefix);
     } catch {
       return false;
     }
+  };
+  // A poster this patch may write over: none of its own, or a generation
+  // placeholder. An author-chosen poster and an already-allocated one are
+  // never overwritten by a generated one — the same rule as the classic
+  // chain's `rewriteSlideMediaReference`.
+  const isReplaceablePoster = (value: unknown): boolean => {
+    if (value === undefined || value === '' || value === ref) return true;
+    return typeof value === 'string' && isGeneratedMediaPlaceholder(value);
   };
   let patched = 0;
   for (const candidate of doc.scenes) {
@@ -427,25 +434,34 @@ export async function patchStageVideoPlaceholder(
     const canvas = scene.content.canvas;
     let touched = false;
     const elements = canvas.elements.map((element) => {
+      if (element.type !== 'video') return element;
+      if (element.mediaRef !== ref && element.src !== ref) return element;
+      // Every slot holding the placeholder moves to the allocated id. The
+      // `mediaRef` rewrite is unconditional for a matched element and is safe
+      // even when the user has swapped in their own concrete `src`: a concrete
+      // src still wins in `resolveVideoMediaForElement`, so their pick renders
+      // and `mediaRef` merely stops being a dangling placeholder.
+      const nextMediaRef = element.mediaRef === ref ? media.src : element.mediaRef;
+      const nextSrc = isReplaceableSrc(element.src) ? media.src : element.src;
+      const nextPoster =
+        media.poster && isReplaceablePoster(element.poster) ? media.poster : element.poster;
       if (
-        element.type === 'video' &&
-        (element.mediaRef === ref || element.src === ref) &&
-        // A user edit that already replaced the placeholder with their own
-        // concrete src wins.
-        isReplaceableSrc(element.src)
+        nextMediaRef === element.mediaRef &&
+        nextSrc === element.src &&
+        nextPoster === element.poster
       ) {
-        touched = true;
-        // Both ids land in the one write: `putScene` is what commits a
-        // freshly allocated entry, so a poster named by a second write would
-        // be a second chance to lose it. A poster the store refused is absent
-        // here, and an element's own poster is left alone rather than cleared.
-        return {
-          ...element,
-          src: media.src,
-          ...(media.poster ? { poster: media.poster } : {}),
-        };
+        return element;
       }
-      return element;
+      touched = true;
+      // Every id lands in the one write: `putScene` is what commits a freshly
+      // allocated entry, so an id named by a second write would be a second
+      // chance to lose it.
+      return {
+        ...element,
+        ...(nextMediaRef !== undefined ? { mediaRef: nextMediaRef } : {}),
+        ...(nextSrc !== undefined ? { src: nextSrc } : {}),
+        ...(nextPoster !== undefined ? { poster: nextPoster } : {}),
+      };
     });
     if (!touched) continue;
     const next = {

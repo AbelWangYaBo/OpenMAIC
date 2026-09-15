@@ -36,6 +36,8 @@ import { createFakeAssetStore } from './_fake-asset-store';
 import { makeDocument, makeSlideScene } from './_stage-fixtures';
 import { createFakeDocumentStore } from './_fake-document-store';
 import type { AppScene } from '@/lib/types/stage';
+import type { PPTVideoElement } from '@openmaic/dsl';
+import { resolveVideoMediaForElement } from '@/lib/media/media-task-resolution';
 
 const providerConfig = {
   providerId: 'seedance' as const,
@@ -308,13 +310,17 @@ describe('generate_video tool', () => {
       .elements as { id: string; src?: string; mediaRef?: string }[];
     // The placeholder element got the concrete src; the other video is untouched.
     // Both allocated ids land in the same putScene: that one write commits
-    // the video entry and the poster entry together.
+    // the video entry and the poster entry together. The binding moves with
+    // the bytes -- `mediaRef` carries the id too, because every resolver reads
+    // it before `src` and would otherwise keep asking about a placeholder no
+    // job is running for.
     expect(elements[0]).toMatchObject({
       id: 'el-video',
-      mediaRef: ref,
+      mediaRef: 'ast_video_1',
       src: 'ast_video_1',
       poster: 'ast_poster_1',
     });
+    expect(elements[0]?.mediaRef).not.toBe(ref);
     expect(elements[1]).toMatchObject({
       id: 'el-other',
       src: 'https://cdn.example.com/existing.mp4',
@@ -922,21 +928,62 @@ describe('patchStageVideoPlaceholder', () => {
     expect(elements[8]?.src).toBe('gen_img_abc');
   });
 
-  it('writes the allocated video and poster ids in one write', async () => {
+  it('moves every placeholder slot, mediaRef included, onto the allocated ids', async () => {
     const fake = createFakeDocumentStore();
     const scene = makeSlideScene('scene-1', 'stage-owner', 1) as AppScene;
     (scene.content as { canvas: { elements: unknown[] } }).canvas.elements.push(
       { id: 'by-ref', type: 'video', mediaRef: 'gen_vid_abc' },
-      // Regeneration against the pool: the previous generation left an
-      // allocated id on the element, and an id carries no stage to scope on,
-      // so the mediaRef binding to THIS job is what makes it replaceable.
-      { id: 'regenerated-pool', type: 'video', mediaRef: 'gen_vid_abc', src: 'ast_previous' },
-      // A user's own concrete src still wins over a stale placeholder.
+      { id: 'by-src', type: 'video', src: 'gen_vid_abc' },
+      { id: 'both-slots', type: 'video', mediaRef: 'gen_vid_abc', src: 'gen_vid_abc' },
+    );
+    fake.docs.set('stage-owner', makeDocument('stage-owner', 'Course', [scene]));
+
+    const patched = await patchStageVideoPlaceholder(fake.store, 'stage-owner', 'gen_vid_abc', {
+      src: 'ast_video_new',
+      poster: 'ast_poster_new',
+    });
+
+    expect(patched).toBe(1);
+    const persisted = await fake.store.getScene('stage-owner', 'scene-1');
+    const elements = (persisted!.content as { canvas: { elements: unknown[] } }).canvas
+      .elements as { id: string; src?: string; mediaRef?: string; poster?: string }[];
+    // No slot is left naming a job that has finished. `mediaRef` is what every
+    // resolver reads first, so leaving it behind is what made a stored,
+    // committed video unrenderable.
+    expect(elements[0]).toMatchObject({
+      mediaRef: 'ast_video_new',
+      src: 'ast_video_new',
+      poster: 'ast_poster_new',
+    });
+    expect(elements[1]).toMatchObject({ src: 'ast_video_new', poster: 'ast_poster_new' });
+    expect(elements[1]?.mediaRef).toBeUndefined();
+    expect(elements[2]).toMatchObject({ mediaRef: 'ast_video_new', src: 'ast_video_new' });
+    for (const element of elements.slice(0, 3)) {
+      expect(JSON.stringify(element)).not.toContain('gen_vid_abc');
+    }
+  });
+
+  it("keeps a user's own pick while retiring the placeholder it was bound to", async () => {
+    const fake = createFakeDocumentStore();
+    const scene = makeSlideScene('scene-1', 'stage-owner', 1) as AppScene;
+    (scene.content as { canvas: { elements: unknown[] } }).canvas.elements.push(
+      // A concrete src the user swapped in mid-job.
       {
-        id: 'user-swap',
+        id: 'user-url',
         type: 'video',
         mediaRef: 'gen_vid_abc',
         src: 'https://cdn.example.com/user.mp4',
+      },
+      // A pick from the shared material library, or the previous generation:
+      // an allocated id is a choice, not a placeholder, and the pre-#1522 rule
+      // preserved exactly such a value.
+      { id: 'user-pool-pick', type: 'video', mediaRef: 'gen_vid_abc', src: 'ast_user_choice' },
+      // An author-chosen poster is never overwritten by a generated one.
+      {
+        id: 'user-poster',
+        type: 'video',
+        mediaRef: 'gen_vid_abc',
+        poster: 'https://cdn.example.com/user.jpg',
       },
     );
     fake.docs.set('stage-owner', makeDocument('stage-owner', 'Course', [scene]));
@@ -949,11 +996,46 @@ describe('patchStageVideoPlaceholder', () => {
     expect(patched).toBe(1);
     const persisted = await fake.store.getScene('stage-owner', 'scene-1');
     const elements = (persisted!.content as { canvas: { elements: unknown[] } }).canvas
-      .elements as { id: string; src?: string; poster?: string }[];
-    expect(elements[0]).toMatchObject({ src: 'ast_video_new', poster: 'ast_poster_new' });
-    expect(elements[1]).toMatchObject({ src: 'ast_video_new', poster: 'ast_poster_new' });
-    expect(elements[2]?.src).toBe('https://cdn.example.com/user.mp4');
-    expect(elements[2]?.poster).toBeUndefined();
+      .elements as { id: string; src?: string; mediaRef?: string; poster?: string }[];
+    // Their src survives; the finished job's placeholder does not linger as a
+    // reference nothing can resolve. A concrete src still wins in
+    // `resolveVideoMediaForElement`, so what renders is their pick.
+    expect(elements[0]?.src).toBe('https://cdn.example.com/user.mp4');
+    expect(elements[0]?.mediaRef).toBe('ast_video_new');
+    expect(elements[1]?.src).toBe('ast_user_choice');
+    expect(elements[1]?.mediaRef).toBe('ast_video_new');
+    expect(elements[2]?.poster).toBe('https://cdn.example.com/user.jpg');
+    expect(elements[2]?.src).toBe('ast_video_new');
+  });
+
+  it('carries the new id on mediaRef when the agent re-points a bound element', async () => {
+    // Regeneration: the element still holds the previous generation's id in
+    // `src` while `mediaRef` names the new job. The id in `src` is preserved
+    // (it is a concrete choice), and the new video still renders because
+    // `sourceRef = concreteSrc ?? mediaRef ?? src` prefers `mediaRef` over a
+    // src that is not a concrete address.
+    const fake = createFakeDocumentStore();
+    const scene = makeSlideScene('scene-1', 'stage-owner', 1) as AppScene;
+    (scene.content as { canvas: { elements: unknown[] } }).canvas.elements.push({
+      id: 'regenerated',
+      type: 'video',
+      mediaRef: 'gen_vid_new',
+      src: 'ast_previous',
+    });
+    fake.docs.set('stage-owner', makeDocument('stage-owner', 'Course', [scene]));
+
+    await patchStageVideoPlaceholder(fake.store, 'stage-owner', 'gen_vid_new', {
+      src: 'ast_video_new',
+    });
+
+    const persisted = await fake.store.getScene('stage-owner', 'scene-1');
+    const element = (persisted!.content as { canvas: { elements: unknown[] } }).canvas
+      .elements[0] as { src?: string; mediaRef?: string };
+    expect(element.mediaRef).toBe('ast_video_new');
+    expect(element.src).toBe('ast_previous');
+    expect(
+      resolveVideoMediaForElement({}, element as PPTVideoElement, 'stage-owner').sourceRef,
+    ).toBe('ast_video_new');
   });
 
   it('leaves an element poster alone when the provider offered none', async () => {

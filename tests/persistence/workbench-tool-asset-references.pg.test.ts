@@ -263,6 +263,19 @@ describe.skipIf(!contractUrl)('workbench tool media through the asset pool', () 
     });
 
     expect(patched).toBe(1);
+    // Read back through the real store: every slot that held the placeholder
+    // now names an allocated id. `mediaRef` is the one every resolver reads
+    // first, so a row in `document_asset_refs` with a placeholder still on the
+    // element would be a reference to bytes nothing can reach.
+    const persisted = (await store().getScene(stageId, 'scene-1')) as unknown as {
+      content: { canvas: { elements: { src?: string; mediaRef?: string; poster?: string }[] } };
+    };
+    expect(persisted.content.canvas.elements[0]).toMatchObject({
+      mediaRef: videoId,
+      src: videoId,
+      poster: posterId,
+    });
+    expect(JSON.stringify(persisted.content.canvas.elements[0])).not.toContain(ref);
     expect(await references(stageId)).toEqual(
       [
         { stage_id: stageId, scope: 'scene', scene_id: 'scene-1', asset_id: videoId },
