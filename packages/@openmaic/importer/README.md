@@ -195,7 +195,7 @@ const slides = await parsedToSlides(json, { upload });
 |---------|--------|---------------|-----|
 | 背景图片 | base64 → Blob | `background_<timestamp>.png` | `a2m` |
 | 图片元素 | base64 → Blob | `image_<timestamp>.png` | `a2m` |
-| 视频封面 | base64 → Blob | `poster_<timestamp>.<图片扩展名>` | `a2m` |
+| 视频封面 | base64 → Blob | `poster_<element-id>.<图片扩展名>` | `a2m` |
 | 数学公式渲染图 | base64 → Blob | `math_<timestamp>.png` | `a2m` |
 | 形状的图案填充 | base64 → Blob | `pattern_<timestamp>.png` | `a2m` |
 | 音频 | 直接是 Blob | `audio_<timestamp>.mp3` | `a2m/audio` |

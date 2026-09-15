@@ -927,7 +927,7 @@ export async function transformParsedToSlides(
                 .replace('svg+xml', 'svg') || 'png';
             uploadTasks.push(
               limitUpload(() =>
-                ctx.uploadBase64Image(el.src!, `poster_${Date.now()}.${extension}`, 'a2m'),
+                ctx.uploadBase64Image(el.src!, `poster_${videoElement.id}.${extension}`, 'a2m'),
               )
                 .then((url) => {
                   videoElement.poster = url;

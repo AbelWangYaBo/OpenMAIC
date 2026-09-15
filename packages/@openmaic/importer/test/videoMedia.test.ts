@@ -144,6 +144,33 @@ function deck(src = poster) {
 }
 
 describe('configurable video poster upload', () => {
+  it('keeps concurrent posters distinct when uploads use filenames as storage keys', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1789441374000);
+    const json = deck();
+    const template = json.slides[0].elements[0];
+    const contents = Array.from({ length: 12 }, (_, i) => `poster-${i}`);
+    json.slides[0].elements = contents.map((content, order) => ({
+      ...template,
+      order,
+      src: `data:image/png;base64,${Buffer.from(content).toString('base64')}`,
+    }));
+    const objects = new Map<string, string>();
+    const [slide] = await parsedToSlides(json, {
+      upload: async (blob, filename, dir) => {
+        const url = `https://storage.example/${dir}/${filename}`;
+        objects.set(url, await blob.text());
+        return url;
+      },
+    });
+    expect(objects.size).toBe(contents.length);
+    expect(
+      slide.elements.map((element) => {
+        expect(element.type).toBe('video');
+        return element.type === 'video' ? objects.get(element.poster!) : undefined;
+      }),
+    ).toEqual(contents);
+  });
+
   it('keeps base64 when no upload callback is configured', async () => {
     const [slide] = await parsedToSlides(deck());
     expect(slide.elements[0]).toMatchObject({ type: 'video', poster });
