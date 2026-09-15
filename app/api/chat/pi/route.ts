@@ -75,8 +75,12 @@ export async function POST(req: NextRequest) {
     }
 
     let elementReference;
+    let interactiveStateNote;
     try {
-      elementReference = attachInteractiveState(body, resolveElementReference(body));
+      ({ elementReference, stateNote: interactiveStateNote } = attachInteractiveState(
+        body,
+        resolveElementReference(body),
+      ));
     } catch (error) {
       if (error instanceof ElementReferenceValidationError) {
         return apiError('INVALID_REQUEST', 400, error.message);
@@ -235,6 +239,7 @@ export async function POST(req: NextRequest) {
         await runPiDirectorLoop({
           body,
           elementReference,
+          interactiveStateNote,
           agentConfigs,
           send,
           languageModel,

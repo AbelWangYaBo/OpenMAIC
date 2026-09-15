@@ -307,7 +307,9 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
 
   function runtimeBody() {
     const base = makeInteractiveBody();
-    const html = '<main id="experiment"><input id="density" value="1000"><canvas></canvas></main>';
+    const html =
+      '<main id="experiment"><input id="density" value="1000"><canvas></canvas>' +
+      '<script type="application/json" data-maic-observation>{}</script></main>';
     base.storeState.scenes[0].content.html = html;
     base.elementReference.selector = '#experiment';
     const graph = (density: number) => ({
@@ -383,7 +385,61 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
       const packet = JSON.parse(
         prompt.match(/<page_reported_state>\n([\s\S]*?)\n<\/page_reported_state>/)![1],
       );
-      expect(packet).toEqual({ status: 'unavailable', reason: 'no-interface' });
+      // The Scene declares the interface; only the sample is missing. Reporting
+      // `no-interface` here would be a false statement about the activity.
+      expect(packet).toEqual({ status: 'unavailable', reason: 'not-sampled' });
+    }
+  });
+
+  it('states unavailable state for an unreferenced send when the browser produced no packet', async () => {
+    // Regression: a declaring Scene with no packet and no reference used to reach
+    // Director and Child with no current-state boundary at all.
+    installAgentShell('Mock unavailable answer.');
+    const { interactiveState: _unused, ...rest } = runtimeBody();
+    const body = rest as Record<string, unknown>;
+    delete body.elementReference;
+    const { POST } = await import('@/app/api/chat/pi/route');
+    const response = await POST(makeRequest(body));
+    expect(response.status).toBe(200);
+    expect(response.headers.get('X-OpenMAIC-Element-Reference-Accepted')).toBeNull();
+    await response.text();
+    for (const prompt of [mocks.directorPrompts.join('\n'), mocks.legacyChildPrompts.join('\n')]) {
+      expect(prompt).toContain('PAGE-REPORTED STATE');
+      expect(prompt).toContain('No component is referenced this turn');
+      expect(prompt).toContain('no general expectation about how pages or widgets usually work');
+      const packet = JSON.parse(
+        prompt.match(/<page_reported_state>\n([\s\S]*?)\n<\/page_reported_state>/)![1],
+      );
+      expect(packet).toEqual({ status: 'unavailable', reason: 'not-sampled' });
+    }
+  });
+
+  it.each([
+    ['unreferenced', true],
+    ['referenced', false],
+  ])('leaves a %s legacy Scene without the interface unchanged', async (_name, unreferenced) => {
+    installAgentShell('Mock legacy answer.');
+    const { interactiveState: _unused, ...rest } = runtimeBody();
+    const body = rest as Record<string, unknown>;
+    // Courseware that declares no interface must not gain a state boundary.
+    (body.storeState as { scenes: { content: { html: string } }[] }).scenes[0].content.html =
+      '<main id="experiment">Legacy 1000</main>';
+    if (unreferenced) delete body.elementReference;
+    else (body.elementReference as { selector: string }).selector = '#experiment';
+    const { POST } = await import('@/app/api/chat/pi/route');
+    const response = await POST(makeRequest(body));
+    expect(response.status).toBe(200);
+    await response.text();
+    const prompts = [mocks.directorPrompts.join('\n'), mocks.legacyChildPrompts.join('\n')];
+    for (const prompt of prompts) {
+      if (unreferenced) {
+        expect(prompt).not.toContain('PAGE-REPORTED STATE');
+      } else {
+        const packet = JSON.parse(
+          prompt.match(/<page_reported_state>\n([\s\S]*?)\n<\/page_reported_state>/)![1],
+        );
+        expect(packet).toEqual({ status: 'unavailable', reason: 'no-interface' });
+      }
     }
   });
 
@@ -511,6 +567,102 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
       }
     },
   );
+
+  it.each(['Legacy', 'Native'] as const)(
+    'keeps component identity while attaching declared area state for %s Child',
+    async (mode) => {
+      if (mode === 'Native') process.env[nativeFlag] = 'true';
+      installAgentShell('Mock component answer.');
+      const body = runtimeBody();
+      // The student picked one component; the declared scope is still the whole area.
+      body.elementReference.selector = '#density';
+      const { POST } = await import('@/app/api/chat/pi/route');
+      const response = await POST(makeRequest(body));
+      await response.text();
+
+      expect(response.status).toBe(200);
+      const child = (mode === 'Native' ? mocks.nativeChildPrompts : mocks.legacyChildPrompts).join(
+        '\n',
+      );
+      for (const prompt of [mocks.directorPrompts.join('\n'), child]) {
+        // Area facts still arrive for a component reference.
+        expect(prompt).toContain('"value":1400');
+        // Reference identity and state scope are named separately.
+        expect(prompt).toContain('referenced component "#density"');
+        expect(prompt).toContain('whole declared activity area "experiment"');
+        expect(prompt).toContain('Area facts are not properties of that component');
+        expect(prompt).toContain('grants no Spotlight or other tool permissions');
+      }
+      // Static identity is untouched: the resolved component is still the picked one.
+      expect(child).toContain('"id":"density"');
+    },
+  );
+
+  it.each(['Legacy', 'Native'] as const)(
+    'grounds an unreferenced follow-up on freshly sampled area state for %s Child',
+    async (mode) => {
+      if (mode === 'Native') process.env[nativeFlag] = 'true';
+      installAgentShell('Mock follow-up answer.');
+      const body = runtimeBody() as Record<string, unknown>;
+      // The follow-up carries no reference at all, exactly like the observed failure.
+      delete body.elementReference;
+      const { POST } = await import('@/app/api/chat/pi/route');
+      const response = await POST(makeRequest(body));
+      await response.text();
+
+      expect(response.status).toBe(200);
+      // Auto-sampling must not look like an accepted component reference.
+      expect(response.headers.get('X-OpenMAIC-Element-Reference-Accepted')).toBeNull();
+      const child = (mode === 'Native' ? mocks.nativeChildPrompts : mocks.legacyChildPrompts).join(
+        '\n',
+      );
+      for (const prompt of [mocks.directorPrompts.join('\n'), child]) {
+        expect(prompt).toContain('"value":1400');
+        expect(prompt).toContain('No component is referenced this turn');
+        expect(prompt).not.toContain('referenced component');
+        expect(prompt).toContain('grants no Spotlight or other tool permissions');
+      }
+    },
+  );
+
+  it('states that current state cannot be determined when an unreferenced sample is unavailable', async () => {
+    installAgentShell('Mock unknown answer.');
+    const body = runtimeBody() as Record<string, unknown>;
+    delete body.elementReference;
+    const state = body.interactiveState as Record<string, unknown>;
+    state.snapshot = {
+      source: 'browser-reported',
+      identity: {
+        sceneId: 'scene-interactive',
+        scopeId: 'experiment',
+        documentId: 'test-document',
+      },
+      requestedAt: Date.now(),
+      receivedAt: Date.now(),
+      status: 'unavailable',
+      reason: 'timeout',
+    };
+    const { POST } = await import('@/app/api/chat/pi/route');
+    const response = await POST(makeRequest(body));
+    await response.text();
+
+    expect(response.status).toBe(200);
+    for (const prompt of [mocks.directorPrompts.join('\n'), mocks.legacyChildPrompts.join('\n')]) {
+      expect(prompt).toContain('"reason":"timeout"');
+      // No value may be supplied from defaults, history or general expectation.
+      expect(prompt).not.toContain('"value":1400');
+      expect(prompt).toContain('no general expectation about how pages or widgets usually work');
+      expect(prompt).toContain('say that the current state cannot be determined');
+    }
+  });
+
+  it('rejects interactive state attached to a slide element reference', async () => {
+    const body = runtimeBody() as Record<string, unknown>;
+    body.elementReference = { kind: 'slide_element', sceneId: 'scene-1', elementId: 'element-1' };
+    const { POST } = await import('@/app/api/chat/pi/route');
+    expect((await POST(makeRequest(body))).status).toBe(400);
+    expect(mocks.resolveModel).not.toHaveBeenCalled();
+  });
 
   it.each(['dynamic-selector', 'wrong-source', 'wrong-scope'] as const)(
     'rejects %s before any model call',

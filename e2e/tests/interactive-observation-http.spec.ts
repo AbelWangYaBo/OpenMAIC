@@ -33,8 +33,8 @@ function bundle(declared: boolean) {
 import React, {useLayoutEffect,useEffect,useMemo,useRef,useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {createObservationSession,withObservationResponder} from './lib/interactive/observation-bridge';
-import {supportsInteractiveObservation} from './lib/interactive/observation';
-import {sampleInteractiveReference} from './lib/interactive/chat-observation';
+import {supportsInteractiveObservation, OBSERVATION_SCOPE_ID} from './lib/interactive/observation';
+import {sampleInteractiveState} from './lib/interactive/chat-observation';
 const useI18n=()=>({t:k=>k});
 const widget={registerObservation(){},registerIframe(){},getSendMessage(){return undefined}};
 const useWidgetIframeStore=selector=>selector(widget);
@@ -45,7 +45,7 @@ const resolveInteractivePickerMode=()=>null;
 import { GENUI_LOGICAL_WIDTH, GENUI_LOGICAL_HEIGHT, fitGenUiViewport } from './lib/interactive/logical-viewport';
 import { intersectClientBoxes } from './lib/edit/visible-client-rect';
 ${component}
-window.sample=()=>sampleInteractiveReference({kind:'interactive_component',sceneId:'s',selector:'#experiment'},
+window.sample=()=>sampleInteractiveState(
  {currentSceneId:'s',scenes:[{id:'s',content:{html:${JSON.stringify(html(declared))}}}]},new AbortController().signal);
 createRoot(document.getElementById('app')).render(<PooledIframe sceneId="s" entry={{srcDoc:${JSON.stringify(html(declared))},rect:{left:0,top:0,width:1000,height:700},clip:null,owner:'o'}} visible={true} playbackArmed={false}/>);
 `,
@@ -54,7 +54,12 @@ createRoot(document.getElementById('app')).render(<PooledIframe sceneId="s" entr
     write: false,
     platform: 'browser',
     format: 'iife',
-    define: { 'process.env.NODE_ENV': '"production"' },
+    // Next inlines NEXT_PUBLIC_* at build time, so the real bundle never reads
+    // `process` at runtime. Mirror that here instead of leaving it undefined.
+    define: {
+      'process.env.NODE_ENV': '"production"',
+      'process.env.NEXT_PUBLIC_COURSEWARE_REFERENCE_ENABLED': '"true"',
+    },
   }).outputFiles[0].text;
 }
 for (const origin of ['http://openmaic-http.test/', 'http://localhost/']) {
@@ -81,14 +86,13 @@ for (const origin of ['http://openmaic-http.test/', 'http://localhost/']) {
       const packet = await page.evaluate(() =>
         (window as unknown as { sample(): Promise<unknown> }).sample(),
       );
-      if (!secure) {
-        expect(packet).toBeUndefined(); // Static reference stays intact; Host supplies unavailable state.
+      if (!secure || !declared) {
+        // Insecure contexts and courseware without the interface stay unsampled;
+        // a static reference is untouched and the Host still reports unavailable.
+        expect(packet).toBeUndefined();
       } else {
         expect(packet).toMatchObject({
-          snapshot: {
-            status: 'unavailable',
-            reason: declared ? 'document-changed' : 'no-interface',
-          },
+          snapshot: { status: 'unavailable', reason: 'document-changed' },
         });
         expect((packet as { sourceHtmlHash: string }).sourceHtmlHash).toMatch(/^[a-f0-9]{64}$/);
       }

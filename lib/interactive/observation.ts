@@ -4,6 +4,11 @@ import { z } from 'zod';
 export const OBSERVATION_VERSION = 1;
 export const OBSERVATION_MAX_BYTES = 32_768;
 export const OBSERVATION_ATTRIBUTE = 'data-maic-observation';
+/**
+ * The single declared activity scope a page publishes state for. It names the
+ * state-evidence scope only; it is never the identity of a referenced component.
+ */
+export const OBSERVATION_SCOPE_ID = 'experiment';
 /** Optional browser capability; unsupported contexts retain static references. */
 export function supportsInteractiveObservation(): boolean {
   return (

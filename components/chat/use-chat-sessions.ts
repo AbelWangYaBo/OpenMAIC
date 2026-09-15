@@ -1,6 +1,6 @@
 'use client';
 
-import { sampleInteractiveReference } from '@/lib/interactive/chat-observation';
+import { sampleInteractiveState } from '@/lib/interactive/chat-observation';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import {
@@ -393,8 +393,8 @@ export async function runPiSingleRequest(
 ): Promise<void> {
   const consumer = createConsumer(sessionId, controller, sessionType);
   const persistenceHeaders = await getPersistenceRequestHeaders();
-  const interactiveState = await sampleInteractiveReference(
-    requestTemplate.elementReference,
+  // Every send re-samples the current Scene, including a follow-up with no reference.
+  const interactiveState = await sampleInteractiveState(
     requestTemplate.storeState,
     controller.signal,
   );

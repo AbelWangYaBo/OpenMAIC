@@ -5,6 +5,7 @@ import {
   createObservationSession,
   withObservationResponder,
 } from '@/lib/interactive/observation-bridge';
+import { OBSERVATION_SCOPE_ID } from '@/lib/interactive/observation';
 import { createPortal } from 'react-dom';
 import { supportsInteractiveObservation } from '@/lib/interactive/observation';
 import { useWidgetIframeStore } from '@/lib/store/widget-iframe';
@@ -240,7 +241,11 @@ function PooledIframe({
   const observation = useMemo(() => {
     if (!entry.srcDoc?.includes('data-maic-observation') || !supportsInteractiveObservation())
       return { html: entry.srcDoc, identity: undefined };
-    const identity = { sceneId, scopeId: 'experiment', documentId: crypto.randomUUID() };
+    const identity = {
+      sceneId,
+      scopeId: OBSERVATION_SCOPE_ID,
+      documentId: crypto.randomUUID(),
+    };
     return {
       identity,
       html: entry.srcDoc ? withObservationResponder(entry.srcDoc, identity) : undefined,
