@@ -971,6 +971,66 @@ export interface RenderTextBodyOptions {
   forceNoWrap?: boolean;
 }
 
+/** Recover font leading from the saved extent of simple shape-auto-fit labels.
+ * Only use extents compatible with one natural line per paragraph. Wrapped,
+ * mixed-size, bulleted, spaced and rotated bodies keep the normal layout path.
+ */
+function autoFitLineHeight(
+  body: TextBody,
+  styles: MergedParagraphStyle[],
+  options?: RenderTextBodyOptions,
+): string | undefined {
+  const bp = body.bodyProperties;
+  if (
+    !bp?.child('spAutoFit').exists() ||
+    !options?.frameHeightPx ||
+    // With many paragraphs, one wrapped line can masquerade as small leading.
+    body.paragraphs.length > 2 ||
+    bp.numAttr('rot') ||
+    (bp.attr('vert') && bp.attr('vert') !== 'horz') ||
+    options.forceNoWrap
+  )
+    return undefined;
+  let fontSize: number | undefined;
+  for (const [index, paragraph] of body.paragraphs.entries()) {
+    const style = styles[index];
+    if (
+      style.lineHeightAbsolute ||
+      (style.lineHeight !== undefined && style.lineHeight !== '1') ||
+      style.spaceBefore ||
+      style.spaceBeforePct ||
+      style.spaceAfter ||
+      style.spaceAfterPct ||
+      style.bulletChar ||
+      style.bulletAutoNum ||
+      !paragraph.runs.length
+    )
+      return undefined;
+    for (const run of paragraph.runs) {
+      const size = run.properties?.numAttr('sz');
+      if (
+        !run.text.trim() ||
+        /[\n\r\t]/.test(run.text) ||
+        run.ommlXml ||
+        run.fldType ||
+        !size ||
+        run.properties?.numAttr('baseline') ||
+        (fontSize !== undefined && size !== fontSize)
+      )
+        return undefined;
+      fontSize = size;
+    }
+  }
+  if (!fontSize) return undefined;
+  const innerHeight =
+    options.frameHeightPx - emuToPx((bp.numAttr('tIns') ?? 45720) + (bp.numAttr('bIns') ?? 45720));
+  const pitch = innerHeight / body.paragraphs.length;
+  const ratio = pitch / (((fontSize / 100) * 4) / 3);
+  // Natural leading is small. A taller extent is not evidence for single-line
+  // paragraphs (it may contain wrapping or unused space); don't stretch to fit.
+  return ratio >= 1.05 && ratio <= 1.3 ? `${pitch.toFixed(4)}px` : undefined;
+}
+
 /**
  * Same contract as `TextRenderer.renderTextBody`, but returns an HTML string for `Shape.content` / `Text.content`
  * (types.ts / README) instead of mutating a DOM `container`.
@@ -995,6 +1055,10 @@ export function renderTextBody(
     textBody.bodyProperties?.attr('spcFirstLastPara') === 'true';
   const lastParaIdx = textBody.paragraphs.length - 1;
 
+  const paragraphStyles = textBody.paragraphs.map((paragraph) =>
+    buildMergedParagraphStyle(textBody, paragraph, category, placeholder, ctx),
+  );
+  const savedAutoFitLineHeight = autoFitLineHeight(textBody, paragraphStyles, options);
   let html = '';
   const textWarp = getSupportedTextWarp(textBody);
 
@@ -1009,7 +1073,7 @@ export function renderTextBody(
       const level = paragraph.level;
 
       // ---- Build merged paragraph style (7-level inheritance) ----
-      const merged = buildMergedParagraphStyle(textBody, paragraph, category, placeholder, ctx);
+      const merged = paragraphStyles[paraIdx - 1];
 
       // ---- Apply paragraph styles (equivalent to paraDiv.style.* in TextRenderer) ----
       const paraCssParts: string[] = [];
@@ -1142,13 +1206,9 @@ export function renderTextBody(
       } else if (merged.textIndent !== undefined) {
         paraCssParts.push(`text-indent: ${merged.textIndent}px`);
       }
-      // OOXML: when <a:lnSpc> is absent at every level of the cascade, the
-      // implicit default is "single spacing" = 1.0. We fall back to that so
-      // the browser doesn't take over with `line-height: normal` (~1.2 for
-      // most fonts, sometimes much larger for CJK with tall typo metrics),
-      // which causes multi-paragraph body text to overflow its container
-      // and visibly stack/overlap.
-      const effectiveLineHeight = merged.lineHeight ?? '1';
+      // Preserve saved font leading for simple auto-fit labels. Other frames
+      // retain the established explicit/default single-spacing behavior.
+      const effectiveLineHeight = savedAutoFitLineHeight ?? merged.lineHeight ?? '1';
       paraCssParts.push(`line-height: ${effectiveLineHeight}`);
       // Determine effective font size for percentage-based spacing
       // Use defRPr or first run's font size, fallback to 12pt
