@@ -1,7 +1,7 @@
 import { keymap } from 'prosemirror-keymap';
 import { Fragment, Slice, type Schema } from 'prosemirror-model';
 import { Plugin } from 'prosemirror-state';
-import { normalizeInlineContainerMarks } from '../inlineContainerMarks';
+import { normalizeInlineContainerMarks, preserveOpenContainerMarks } from '../inlineContainerMarks';
 import { history } from 'prosemirror-history';
 import { baseKeymap } from 'prosemirror-commands';
 import { dropCursor } from 'prosemirror-dropcursor';
@@ -21,6 +21,7 @@ export const buildPlugins = (schema: Schema, options?: PluginOptions) => {
   const plugins = [
     new Plugin({
       props: {
+        transformCopied: preserveOpenContainerMarks,
         transformPasted(slice) {
           const children = [];
           for (let i = 0; i < slice.content.childCount; i++) {

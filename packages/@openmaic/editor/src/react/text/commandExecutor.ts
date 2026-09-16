@@ -1,5 +1,6 @@
-import { lift, toggleMark, wrapIn } from 'prosemirror-commands';
+import { lift, wrapIn } from 'prosemirror-commands';
 import type { EditorView } from 'prosemirror-view';
+import { toggleInlineMark, materializeInlineMark } from './prosemirror/commands/toggleInlineMark';
 import { replaceText } from './prosemirror/commands/replaceText';
 import { setListStyle } from './prosemirror/commands/setListStyle';
 import { alignmentCommand } from './prosemirror/commands/setTextAlign';
@@ -27,13 +28,15 @@ function toggleTextMark(view: EditorView, markName: string, selectAll: boolean) 
   const markType = view.state.schema.marks[markName];
   if (!markType) return;
   if (selectAll) autoSelectAll(view);
-  toggleMark(markType)(view.state, view.dispatch);
+  toggleInlineMark(markType)(view.state, view.dispatch);
 }
 
 function clearTextFormatting(view: EditorView) {
   autoSelectAll(view);
   const { $from, $to } = view.state.selection;
-  view.dispatch(view.state.tr.removeMark($from.pos, $to.pos));
+  const tr = view.state.tr;
+  for (const type of Object.values(view.state.schema.marks)) materializeInlineMark(tr, type);
+  view.dispatch(tr.removeMark($from.pos, $to.pos));
   setListStyle(view, [
     { key: 'fontsize', value: '' },
     { key: 'color', value: '' },
@@ -59,13 +62,13 @@ function setTextLink(view: EditorView, href: string) {
 
   if (markActive(view.state, markType)) {
     if (href) addMark(view, markType.create({ href, title: href }));
-    else toggleMark(markType)(view.state, view.dispatch);
+    else toggleInlineMark(markType)(view.state, view.dispatch);
     return;
   }
 
   if (!href) return;
   autoSelectAll(view);
-  toggleMark(markType, { href, title: href })(view.state, view.dispatch);
+  toggleInlineMark(markType, { href, title: href })(view.state, view.dispatch);
 }
 
 function toggleTextList(view: EditorView, ordered: boolean, listStyleType = '') {
