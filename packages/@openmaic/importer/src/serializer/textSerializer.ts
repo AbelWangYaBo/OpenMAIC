@@ -131,6 +131,23 @@ function symbolFontCharToUnicode(char: string, fontName: string): string {
   return '•';
 }
 
+/** a:sym selects the font for symbol-private-use characters, not the whole run.
+ * Office can leave it attached to ordinary dates/punctuation after a font edit.
+ */
+function mapRunSymbols(text: string, properties: SafeXmlNode | undefined): string {
+  const font = properties?.child('sym').attr('typeface');
+  if (!isSymbolFont(font)) return text;
+  const legacySymbolRun = isSymbolFont(properties?.child('latin').attr('typeface'));
+  return Array.from(text)
+    .map((char) => {
+      const code = char.codePointAt(0)!;
+      return (code >= 0xf000 && code <= 0xf0ff) || (legacySymbolRun && code <= 0xff)
+        ? symbolFontCharToUnicode(char, font!)
+        : char;
+    })
+    .join('');
+}
+
 // ---------------------------------------------------------------------------
 // Style Inheritance Helpers
 // ---------------------------------------------------------------------------
@@ -871,15 +888,7 @@ function renderTextWarp(
       }
 
       let runText = run.text ?? '';
-      if (run.properties) {
-        const symNode = run.properties.child('sym');
-        const symTypeface = symNode.exists() ? symNode.attr('typeface') : undefined;
-        if (isSymbolFont(symTypeface)) {
-          runText = Array.from(runText)
-            .map((ch) => symbolFontCharToUnicode(ch, symTypeface!))
-            .join('');
-        }
-      }
+      runText = mapRunSymbols(runText, run.properties);
 
       const style = runStylesToCssString(runStyle, run, options, ctx);
       for (const ch of textRunToGlyphs(runText)) {
@@ -1331,12 +1340,11 @@ export function renderTextBody(
         (n, r) => n + (r.text ? (r.text.match(/\t/g)?.length ?? 0) : 0),
         0,
       );
-      const useCustomTabColumns =
-        !!merged.tabStopsPx?.length &&
+      const useTabColumns =
         totalTabs > leadingFoldedTabs &&
         // Formula layout cannot be measured with plain-text canvas metrics.
         !paragraph.runs.some((run) => run.ommlXml);
-      if (totalTabs - leadingFoldedTabs > 0 && !useCustomTabColumns) {
+      if (totalTabs - leadingFoldedTabs > 0 && !useTabColumns) {
         paraCssParts.push(`tab-size: ${resolveTabPx().toFixed(2)}px`);
       }
       if (noWrap) {
@@ -1529,7 +1537,7 @@ export function renderTextBody(
       // Use actual browser font metrics to decide which stop follows the text.
       // The output contains fixed column widths, so consumers need no tab support.
       const tabMeasure =
-        useCustomTabColumns && typeof OffscreenCanvas !== 'undefined'
+        useTabColumns && typeof OffscreenCanvas !== 'undefined'
           ? new OffscreenCanvas(1, 1).getContext('2d')
           : null;
       const measureTabText = (text: string, paintStyle: string): number => {
@@ -1565,7 +1573,7 @@ export function renderTextBody(
         return width + Array.from(text).length * spacingPx;
       };
 
-      if (useCustomTabColumns && tabBulletText) {
+      if (useTabColumns && tabBulletText) {
         tabCursorPx += measureTabText(tabBulletText, tabBulletStyle);
       }
 
@@ -1686,24 +1694,14 @@ export function renderTextBody(
             if (!runText) runText = String(ctx.slide.index + 1);
           }
         }
-        if (run.properties) {
-          const symNode = run.properties.child('sym');
-          if (symNode.exists()) {
-            const symTypeface = symNode.attr('typeface');
-            if (isSymbolFont(symTypeface)) {
-              runText = Array.from(runText)
-                .map((ch) => symbolFontCharToUnicode(ch, symTypeface!))
-                .join('');
-            }
-          }
-        }
+        runText = mapRunSymbols(runText, run.properties);
         const inner = formatRunTextForHtml(runText);
         const tabStyleSuffix = runText.includes('\t') ? ';white-space: pre' : '';
 
         const styleStr = runStylesToCssString(runStyle, run, options, ctx) + tabStyleSuffix;
         const isLink = !!runStyle.hlinkClick;
 
-        if (useCustomTabColumns) {
+        if (useTabColumns) {
           flushAccumulatedRun();
           prevStyleStr = null;
           const paintStyle = runStylesToCssString(runStyle, run, options, ctx);
@@ -1724,7 +1722,7 @@ export function renderTextBody(
               if (part < parts.length - 1) {
                 const grid = merged.defaultTabSizePx ?? 96;
                 const stop =
-                  merged.tabStopsPx!.find((pos) => pos > textEndPx + 0.01) ??
+                  merged.tabStopsPx?.find((pos) => pos > textEndPx + 0.01) ??
                   (Math.floor((textEndPx + 0.01) / grid) + 1) * grid;
                 const widthPt = ((stop - tabCursorPx) * 3) / 4;
                 // Server estimates can undercount wide glyphs. Let their columns

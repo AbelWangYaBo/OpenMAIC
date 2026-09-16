@@ -149,3 +149,17 @@ it('marks custom tab columns so the editor can preserve their boundaries', () =>
   );
   expect(html.match(/data-pptx-tab-column="true"/g)).toHaveLength(2);
 });
+
+it('serializes default-grid tabs as editable columns even without a custom tab list', () => {
+  const html = renderTxBodyHtml(`<a:p><a:r><a:rPr sz="1200"/><a:t>A\t\t\tB</a:t></a:r></a:p>`);
+  expect(html.match(/data-pptx-tab-column="true"/g)).toHaveLength(3);
+  expect(html).not.toContain('\t');
+  expect(html).not.toContain('tab-size:');
+});
+
+it('uses inherited default tab spacing without requiring custom stops', () => {
+  const html = renderTxBodyHtml(`<a:lstStyle><a:lvl1pPr defTabSz="457200"/></a:lstStyle>
+    <a:p><a:r><a:rPr sz="1200"/><a:t>A\tB</a:t></a:r></a:p>`);
+  expect(html).toContain('data-pptx-tab-column="true"');
+  expect(html).toContain('width:36.00pt;');
+});
