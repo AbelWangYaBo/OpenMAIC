@@ -542,7 +542,10 @@ export async function runServiceCase(settingsPath, name, evidencePath) {
       }
       if (name === 'cancel')
         assert.equal((await request(`/render/${id}`, { method: 'DELETE' })).status, 200);
-      if (name === 'api-death') signal(api, 'SIGKILL');
+      if (name === 'api-death') {
+        signal(api, 'SIGKILL');
+        await until(() => observation.evidence.exitObserved, 25000);
+      }
       if (name === 'supervisor-death') signal(supervisor, 'SIGKILL');
       if (name === 'guardian-death') signal(guardian, 'SIGKILL');
       if (name === 'task-oom' || name === 'ancestor-pressure') {
@@ -635,8 +638,14 @@ export async function runServiceCase(settingsPath, name, evidencePath) {
     // injected stops so ordinary bounded cleanup can run; no cgroup force-kill,
     // chmod/remount, directory deletion or blind retry is hidden here.
     try {
+      const cleanupDeadline = performance.now() + 25000;
       for (const row of frozen) if (still(row)) signal(row, 'SIGCONT');
       if (still(api)) signal(api, 'SIGTERM');
+      // waitpid in the native orphan reaper can steal this direct child's
+      // status between a /proc check and Node's SIGCHLD callback. Let Node
+      // collect its child before invoking that reaper during shutdown.
+      if (child?.pid && observation)
+        await until(() => observation.evidence.exitObserved, 25000);
       await until(() => {
         reapOrphans();
         return (
@@ -645,7 +654,7 @@ export async function runServiceCase(settingsPath, name, evidencePath) {
           [...known.values()].every((row) => !still(row)) &&
           [...guardians.values()].every((row) => !still(row))
         );
-      }, 25000);
+      }, Math.max(0, cleanupDeadline - performance.now()));
       report.cleanup = {
         status: 'PROCESSES_EXITED',
         sessionRetained: fs.existsSync(session),

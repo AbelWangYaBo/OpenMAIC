@@ -82,6 +82,38 @@ it('subtracts transport time before invoking the original Producer API', async (
   expect(run.timeoutMs).toBeGreaterThan(0);
   expect(run.timeoutMs).toBeLessThanOrEqual(1000);
 });
+it('preserves deadline classification and settlement when the worker error contains only logs', async () => {
+  const { handle, request, render, send } = handler();
+  const details = {
+    published: false,
+    cleanupVerified: true,
+    reservationReturned: true,
+    residual: { memoryCurrent: '123' },
+  };
+  const clock = vi.spyOn(process.hrtime, 'bigint').mockReturnValue(1_000_000_000n);
+  try {
+    render.mockImplementationOnce(async () => {
+      clock.mockReturnValue(3_000_000_000n);
+      const error = new BudgetedRenderError(details);
+      error.message = '[INFO] encoding frames';
+      throw error;
+    });
+    await handle({ ...request, deadlineNs: '2000000000' });
+    expect(render).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'result',
+        result: expect.objectContaining({
+          status: 'failed',
+          failure: { code: 'deadline_exceeded', message: 'Render exceeded the deadline' },
+          resources: expect.objectContaining({ reservationReturned: true, details }),
+        }),
+      }),
+    );
+  } finally {
+    clock.mockRestore();
+  }
+});
 it('forwards cancellation to the active original Producer and preserves failed settlement', async () => {
   const { handle, request, render, send } = handler();
   const details = {

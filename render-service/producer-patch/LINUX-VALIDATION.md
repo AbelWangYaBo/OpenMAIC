@@ -1,8 +1,8 @@
 # Installed Linux validation
 
-**Current candidate: NOT_RUN for native and Producer/OpenMAIC runtime cases.**
-OS dependency installation alone does not qualify the product. Record results
-against the exact source, built packages and actual dependency locks.
+OS dependency installation alone does not qualify the product. Record each
+case as PASS, FAIL or NOT_RUN against the exact source, built packages and actual
+dependency locks in the candidate's validation report.
 
 ## Environment
 
@@ -31,7 +31,8 @@ existing private Producer builder:
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund
-node scripts/build-resource-producer.mjs --build /opt/hyperframes-source /opt/openmaic-resource
+FFMPEG_BIN=/usr/bin/ffmpeg node scripts/build-resource-producer.mjs \
+  --build /opt/hyperframes-source /opt/openmaic-resource
 ```
 
 For a safely extracted fixed source archive, use `--build-archive`.

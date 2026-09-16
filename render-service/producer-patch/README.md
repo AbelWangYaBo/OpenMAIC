@@ -6,8 +6,8 @@ and reservation/artifact settlement. The original upstream license is retained
 in `LICENSE`.
 
 This is an experimental, opt-in service path. The default service retains its
-npm-locked Producer 0.7.107 and existing privilege model. **The current resource
-installation and OpenMAIC Linux lifecycle cases are not yet qualified.**
+npm-locked Producer 0.7.107 and existing privilege model. **The resource
+path requires installed Linux qualification for the deployment target.**
 
 ## Build
 
@@ -20,8 +20,9 @@ From `render-service`:
 # Applies and verifies the patch in a temporary directory; installs nothing.
 node scripts/build-resource-producer.mjs --check /path/to/hyperframes
 
-# Installs frozen dependencies and builds the private package.
-node scripts/build-resource-producer.mjs --build /path/to/hyperframes /opt/openmaic-resource
+# Reuses provisioned FFmpeg during the upstream dependency install.
+FFMPEG_BIN=/usr/bin/ffmpeg node scripts/build-resource-producer.mjs \
+  --build /path/to/hyperframes /opt/openmaic-resource
 ```
 
 The output directory must not exist. The builder uses upstream `bun.lock`,
@@ -40,7 +41,9 @@ The builder does not download or extract the archive.
 
 `producer.patch` contains the implementation and its tests. `source.json`
 binds the patch and changed-file hashes. Build commands do not provision OS
-packages, Chromium, FFmpeg, cgroups or a VM, and do not run product tests.
+packages, Chromium, cgroups or a VM, and do not run product tests. Set
+`FFMPEG_BIN` to an existing executable to prevent the upstream `ffmpeg-static`
+install script from downloading another binary.
 
 ## Startup and ownership
 

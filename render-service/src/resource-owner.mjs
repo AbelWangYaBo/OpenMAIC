@@ -94,7 +94,7 @@ export function createResourceHandler({
         status: cancelled ? 'cancelled' : 'failed',
         failure: {
           code: cancelled ? 'cancelled' : expired ? 'deadline_exceeded' : 'execution_failed',
-          message: String(error).slice(-8192),
+          message: expired && !cancelled ? 'Render exceeded the deadline' : String(error).slice(-8192),
         },
         resources: {
           published: details.published === true,
