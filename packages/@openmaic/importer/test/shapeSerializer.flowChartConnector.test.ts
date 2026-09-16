@@ -55,7 +55,9 @@ describe('flowchart nodes versus connector lines', () => {
   it('preserves the inverse diagonal path of lineInv', async () => {
     const { shape, element } = await importPreset('lineInv');
     expect(element.type).toBe('shape');
-    if (element.type !== 'shape') throw new Error('Expected inverse path');
+    if (element.type !== 'shape' || shape.type !== 'shape') {
+      throw new Error('Expected inverse path shape');
+    }
     expect(element.path).toBe(shape.path);
     expect(element.path).toMatch(/^M[\d.]+,0 L0,[\d.]+$/);
   });
