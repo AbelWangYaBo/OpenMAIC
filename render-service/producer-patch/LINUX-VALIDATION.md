@@ -80,9 +80,18 @@ framework or infer coverage from a case name alone.
 | Normal return and recovery | Run consecutive real exports and cleanable-failure recovery with the new installed package. Retained temporary objects must fit the unchanged budgets; reservations return, retained inputs and previous artifacts remain readable. |
 | Unknown reference during normal completion | Run `real-unknown-reference-normal`; require reference rejection after normal worker exit, quarantine, closed admission and no replacement of the previous artifact. |
 | Per-attempt PID enforcement | Run `pids-limit`; require kernel EAGAIN, task-local PID events, descendant drain and successful guardian cleanup with control-domain headroom. |
-| Failed cleanup cannot return a reservation | `renderExecutionContext.test.ts` covers a real filesystem rename failure without unlink fallback; `supervisor.test.ts` covers injected disposer failure and post-publication directory-removal failure retaining reservations. These cover their respective boundaries, not an actual failed unlink/rmdir in the native guardian. Keep that concrete runtime path open until covered by identified evidence; add only a targeted case in the existing runner if needed, not a separate native suite. |
-| A retains a reference while B completes | Admission unit tests cover reservation arithmetic only. Still demonstrate a real retained A object while an already-active B completes, preserving A's reservation and B's independent settlement. Do not admit new work after quarantine or add HTTP concurrency for this check. |
-| S restart and ownership transfer | Existing checks reject reuse of an unfinished session. Still demonstrate platform revocation of the old owner's launch rights, explicit takeover or whole-envelope replacement, then a new S serving successfully. This is a bounded platform lifecycle check, not a requirement for a new automatic recovery service or persistent queue. |
+| Failed cleanup cannot return a reservation | Portable tests cover a real filesystem rename failure and injected owner cleanup failures. `real-deletion-failure` additionally marks one task-owned file immutable, requires the actual guardian `unlink` to fail, and checks retained reservation/object, closed admission and unchanged output before the test platform removes that flag. This Linux case is NOT_RUN. |
+| A retains a reference while B completes | `real-retained-a-completes-b` gates both tasks on live media, retains an external link to A's private work file, lets A finish into quarantine, then allows the already-active B to finish. A's reservation/link must remain while B's reservation returns and its output decodes. No new work is admitted after quarantine. This Linux case is NOT_RUN. |
+| S restart and ownership transfer | `real-supervisor-death` rejects reuse of the unfinished session, verifies the old S/G and descendants exited, then lets the test platform remove the empty owned session before starting a new S. Require a decoded export, reservation return and clean new-session closure. This added recovery leg is NOT_RUN; it does not implement automatic product recovery or a persistent queue. |
+
+The A/B case alone uses the existing Producer API with two active slots and an
+owner envelope of 2 CPU / 1536 MiB (two original task reservations). Each task
+keeps 1 CPU / 768 MiB / swap 0, 256 PIDs and the original deadline. It fits inside
+the existing outer execution limits of 3 CPU / 10 GiB / 1024 PIDs. The HTTP
+single-task configuration is unchanged. The deletion case requires existing
+`chattr`/`lsattr` and immutable-inode support on the run filesystem; unsupported
+injection is a failure, not a skip or a cleanup PASS. Do not install tools or
+change the filesystem to make this case pass.
 
 ## OpenMAIC installed service
 

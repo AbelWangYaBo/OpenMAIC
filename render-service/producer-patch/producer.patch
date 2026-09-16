@@ -1589,10 +1589,10 @@ index 0000000..5e53f1c
 +}
 diff --git a/packages/producer/src/resources/installed-linux-cases.mjs b/packages/producer/src/resources/installed-linux-cases.mjs
 new file mode 100644
-index 0000000..e00f932
+index 0000000..ca6cec5
 --- /dev/null
 +++ b/packages/producer/src/resources/installed-linux-cases.mjs
-@@ -0,0 +1,1158 @@
+@@ -0,0 +1,1366 @@
 +// fallow-ignore-file complexity
 +// Concrete fault cases deliberately keep injection, observation and terminal assertions together.
 +// Concrete installed-package tests, shared by Vitest and the existing guest executor.
@@ -2439,6 +2439,8 @@ index 0000000..e00f932
 +          "supervisor-death",
 +          "unknown-reference",
 +          "unknown-reference-normal",
++          "deletion-failure",
++          "retained-a-completes-b",
 +          "ancestor-pressure",
 +        ]) {
 +          await test(`real-${kind}`, async (row) => {
@@ -2449,7 +2451,9 @@ index 0000000..e00f932
 +            const request = makeRequest(output, 30),
 +              observed = [],
 +              cancel = new AbortController();
-+            let producer, child, done, failure, memoryFd, queued;
++            let producer, child, done, failure, memoryFd, queued, immutablePath;
++            let second, secondOutcome, secondGate;
++            const concurrent = kind === "retained-a-completes-b";
 +            const started = performance.now(),
 +              timeoutMs = kind === "deadline" ? 15000 : 120000;
 +            const fault = { kind, mediaReady: false, observed, timeoutMs, injection: null };
@@ -2460,7 +2464,18 @@ index 0000000..e00f932
 +              write(config, { resources: entries[0], options, request, budget });
 +              ({ child, done } = childProcess([self, "producer-child", config]));
 +            } else {
-+              producer = createBudgetedProducer(options);
++              // Two original task budgets, within the unchanged outer test envelope.
++              // This exercises the existing Producer API, not HTTP concurrency.
++              producer = createBudgetedProducer(
++                concurrent
++                  ? {
++                      ...options,
++                      maxActive: 2,
++                      cpuMillis: budget.cpuMillis * 2,
++                      memoryBytes: budget.memoryBytes * 2,
++                    }
++                  : options,
++              );
 +              done = producer
 +                .render(request, budget, {
 +                  timeoutMs,
@@ -2531,18 +2546,82 @@ index 0000000..e00f932
 +              fault.previousOutputSha256 = previousHash;
 +              fault.reservationAtInjection = producer ? producer.status() : null;
 +              save();
-+              if (kind === "unknown-reference" || kind === "unknown-reference-normal") {
-+                const reserved = fs
-+                  .readdirSync(work)
-+                  .find((name) => fs.statSync(join(work, name)).isDirectory());
-+                assert(reserved);
-+                let directory = join(work, reserved, "scratch");
-+                if (kind === "unknown-reference-normal") {
++              const reservedEntries = fs
++                .readdirSync(work, { withFileTypes: true })
++                .filter((entry) => entry.isDirectory() && entry.name.includes(".hf-transaction-"));
++              assert.equal(reservedEntries.length, 1, "Identify A before starting B");
++              const taskRoot = join(work, reservedEntries[0].name);
++              fault.taskRoot = taskRoot;
++              if (concurrent) {
++                second = producer
++                  .render(makeRequest(join(work, "b.mp4"), 30), budget, {
++                    timeoutMs: 120000,
++                    signal: cancel.signal,
++                  })
++                  .then(
++                    (result) => {
++                      secondOutcome = { result };
++                    },
++                    (error) => {
++                      secondOutcome = { error: String(error), settlement: error.settlement };
++                    },
++                  );
++                await until(() => {
++                  if (secondOutcome)
++                    throw new Error("B settled before overlap: " + JSON.stringify(secondOutcome));
++                  const b = tasks().find((path) => path !== domain);
++                  if (!b) return false;
++                  secondGate = mediaGate(pids(b).map(status), b);
++                  if (!secondGate) return false;
++                  fault.secondDomain = b;
++                  return true;
++                });
++                for (const proc of secondGate.observed) process.kill(proc.pid, "SIGSTOP");
++                secondGate = mediaGate(pids(fault.secondDomain).map(status), fault.secondDomain);
++                assert(secondGate, "B must be in the media phase before A is quarantined");
++                assert.equal(read(join(fault.secondDomain, "cpu.max")), "100000 100000");
++                assert.equal(
++                  read(join(fault.secondDomain, "memory.max")),
++                  String(budget.memoryBytes),
++                );
++                assert.equal(
++                  read(join(fault.secondDomain, "pids.max")),
++                  String(options.taskPidsMax),
++                );
++                fault.overlap = { reservation: producer.status(), gate: secondGate };
++                assert.equal(fault.overlap.reservation.active, 2);
++                assert.equal(fault.overlap.reservation.memoryBytes, budget.memoryBytes * 2);
++                save();
++              }
++              if (kind === "deletion-failure") {
++                immutablePath = join(taskRoot, "failed-unlink");
++                fs.writeFileSync(immutablePath, "must remain until platform takeover");
++                // Immutable inode forces the actual privileged guardian unlink to
++                // fail. Missing filesystem support fails the case, never skips it.
++                execFileSync("/usr/bin/chattr", ["+i", immutablePath], { timeout: 5000 });
++                fault.deletionInjection = {
++                  path: immutablePath,
++                  inode: fs.statSync(immutablePath).ino,
++                  flags: execFileSync("/usr/bin/lsattr", ["-d", immutablePath], {
++                    encoding: "utf8",
++                    timeout: 5000,
++                  }),
++                };
++                assert(fault.deletionInjection.flags.split(/\s+/)[0].includes("i"));
++                save();
++              }
++              if (
++                kind === "unknown-reference" ||
++                kind === "unknown-reference-normal" ||
++                concurrent
++              ) {
++                let directory = join(taskRoot, "scratch");
++                if (kind === "unknown-reference-normal" || concurrent) {
 +                  const taskWork = fs
-+                    .readdirSync(join(work, reserved), { withFileTypes: true })
++                    .readdirSync(taskRoot, { withFileTypes: true })
 +                    .find((entry) => entry.isDirectory() && entry.name.startsWith("work-"));
 +                  assert(taskWork, "Actual pipeline work directory required");
-+                  directory = join(work, reserved, taskWork.name);
++                  directory = join(taskRoot, taskWork.name);
 +                }
 +                const source = join(directory, "retained");
 +                fault.referenceSource = source;
@@ -2591,7 +2670,7 @@ index 0000000..e00f932
 +                save();
 +              } else if (kind === "guardian-death") process.kill(guardian, "SIGKILL");
 +              else if (kind === "supervisor-death") child.kill("SIGKILL");
-+              else if (kind === "unknown-reference-normal") {
++              else if (kind === "unknown-reference-normal" || concurrent) {
 +                // No cancellation: let the real normal disposer run before G.
 +                for (const proc of observed)
 +                  if (status(proc.pid)) process.kill(proc.pid, "SIGCONT");
@@ -2599,9 +2678,13 @@ index 0000000..e00f932
 +              } else if (kind !== "deadline") cancel.abort(new Error(kind));
 +              const terminal = await Promise.race([
 +                done,
-+                delay(kind === "unknown-reference-normal" ? timeoutMs + 10000 : 25000, undefined, {
-+                  ref: false,
-+                }).then(() => {
++                delay(
++                  kind === "unknown-reference-normal" || concurrent ? timeoutMs + 10000 : 25000,
++                  undefined,
++                  {
++                    ref: false,
++                  },
++                ).then(() => {
 +                  throw new Error("Product cleanup deadline");
 +                }),
 +              ]);
@@ -2639,20 +2722,75 @@ index 0000000..e00f932
 +                // Platform test owner may remove the empty, unreusable dead-S session.
 +                fs.rmdirSync(domain);
 +                fs.rmdirSync(session);
++                fault.platformTransfer = {
++                  oldSupervisorPid: child.pid,
++                  oldSupervisorAbsent: status(child.pid) === null,
++                  oldGuardianAbsent: status(guardian) === null,
++                  oldSessionRemoved: !exists(session),
++                  oldOutputSha256: hashFile(output),
++                };
++                assert(
++                  fault.platformTransfer.oldSupervisorAbsent &&
++                    fault.platformTransfer.oldGuardianAbsent,
++                );
++                const restartConfig = join(work, "restart.json");
++                write(restartConfig, {
++                  resources: entries[0],
++                  options,
++                  request: makeRequest(join(work, "restarted.mp4")),
++                  budget,
++                });
++                const restarted = childProcess([self, "producer-child", restartConfig]);
++                const messages = [];
++                restarted.child.on("message", (message) => messages.push(message));
++                try {
++                  const exit = await Promise.race([
++                    restarted.done,
++                    delay(130000, undefined, { ref: false }).then(() => {
++                      throw new Error("Restart validation deadline");
++                    }),
++                  ]);
++                  fault.restart = { pid: restarted.child.pid, messages, exit };
++                  assert.notEqual(restarted.child.pid, child.pid);
++                  assert.equal(exit.code, 0);
++                  assert(messages.some((message) => message.event === "supervisor-ready"));
++                  const success = messages.find((message) => message.event === "result");
++                  assert(
++                    success?.result.reservationReturned,
++                    "New S must complete and settle an export",
++                  );
++                  assert(!messages.some((message) => message.event === "failed"));
++                  execFileSync(
++                    "/usr/bin/ffmpeg",
++                    ["-v", "error", "-xerror", "-i", success.result.outputPath, "-f", "null", "-"],
++                    { timeout: 15000 },
++                  );
++                  assert(!exists(session), "New S must close its new session");
++                  assert.equal(hashFile(output), previousHash);
++                  fault.restart.decoded = true;
++                } finally {
++                  if (restarted.child.exitCode === null && restarted.child.signalCode === null)
++                    restarted.child.kill("SIGKILL");
++                }
 +              } else if (
 +                kind === "guardian-death" ||
 +                kind === "unknown-reference" ||
-+                kind === "unknown-reference-normal"
++                kind === "unknown-reference-normal" ||
++                kind === "deletion-failure" ||
++                concurrent
 +              ) {
 +                assert.match(failure, /cleanup could not be verified|quarantined/);
 +                assert.equal(producer.status().quarantined, 1);
-+                assert.equal(producer.status().memoryBytes, budget.memoryBytes);
-+                assert.equal(producer.status().cpuMillis, budget.cpuMillis);
++                assert.equal(
++                  producer.status().memoryBytes,
++                  budget.memoryBytes * (concurrent ? 2 : 1),
++                );
++                assert.equal(producer.status().cpuMillis, budget.cpuMillis * (concurrent ? 2 : 1));
 +                await assert.rejects(
 +                  producer.render(request, budget, { timeoutMs: 1000 }),
 +                  /closed|quarantined/,
 +                );
-+                if (kind === "unknown-reference-normal") {
++                if (kind === "unknown-reference-normal" || concurrent) {
 +                  assert(fault.allowedNormalCompletion);
 +                  assert(
 +                    !exists(fault.referenceSource),
@@ -2662,6 +2800,69 @@ index 0000000..e00f932
 +                  assert.match(failure, /worker=0/);
 +                  assert.match(failure, /unknown retained file reference/);
 +                  fault.normalWorkerExitVerified = true;
++                }
++                if (kind === "deletion-failure") {
++                  assert.match(failure, /cleanup unlink: errno=1 /);
++                  assert.equal(fs.statSync(immutablePath).ino, fault.deletionInjection.inode);
++                  assert.equal(
++                    fs.readFileSync(immutablePath, "utf8"),
++                    "must remain until platform takeover",
++                  );
++                  assert.equal(fault.settlement.reservationReturned, false);
++                  assert.equal(fault.settlement.cleanupVerified, false);
++                  fault.failedObjectRetained = true;
++                  execFileSync("/usr/bin/chattr", ["-i", immutablePath], { timeout: 5000 });
++                  immutablePath = undefined;
++                }
++                if (concurrent) {
++                  assert(!secondOutcome, "B must still be active when A is quarantined");
++                  for (const proc of secondGate.observed) {
++                    const current = status(proc.pid);
++                    assert(
++                      current &&
++                        current.stat.slice(current.stat.lastIndexOf(")") + 2).split(" ")[19] ===
++                          proc.stat.slice(proc.stat.lastIndexOf(")") + 2).split(" ")[19],
++                      "B process identity changed",
++                    );
++                    process.kill(proc.pid, "SIGCONT");
++                  }
++                  await Promise.race([
++                    second,
++                    delay(130000, undefined, { ref: false }).then(() => {
++                      throw new Error("B completion deadline");
++                    }),
++                  ]);
++                  fault.second = secondOutcome;
++                  assert(secondOutcome.result?.reservationReturned, JSON.stringify(secondOutcome));
++                  assert.equal(fs.statSync(join(work, "retained-link")).nlink, 2);
++                  assert.equal(hashFile(output), previousHash);
++                  assert.deepEqual(producer.status(), {
++                    ...producer.status(),
++                    active: 0,
++                    quarantined: 1,
++                    cpuMillis: budget.cpuMillis,
++                    memoryBytes: budget.memoryBytes,
++                    closed: true,
++                  });
++                  assert(!exists(fault.secondDomain));
++                  secondGate.observed.forEach((proc) => assert.equal(status(proc.pid), null));
++                  execFileSync(
++                    "/usr/bin/ffmpeg",
++                    [
++                      "-v",
++                      "error",
++                      "-xerror",
++                      "-i",
++                      secondOutcome.result.outputPath,
++                      "-f",
++                      "null",
++                      "-",
++                    ],
++                    { timeout: 15000 },
++                  );
++                  fault.second.decoded = true;
++                  fault.reservationAfterB = producer.status();
++                  save();
 +                }
 +                fault.admissionRejectedWhileQuarantined = true;
 +                await assert.rejects(producer.close(), /quarantined/);
@@ -2724,6 +2925,13 @@ index 0000000..e00f932
 +              return fault;
 +            } finally {
 +              if (memoryFd !== undefined) fs.closeSync(memoryFd);
++              if (immutablePath && exists(immutablePath)) {
++                try {
++                  execFileSync("/usr/bin/chattr", ["-i", immutablePath], { timeout: 5000 });
++                } catch (error) {
++                  fault.platformCleanupFailure = String(error);
++                }
++              }
 +              if (child && child.exitCode === null && child.signalCode === null)
 +                child.kill("SIGKILL");
 +              if (producer) {

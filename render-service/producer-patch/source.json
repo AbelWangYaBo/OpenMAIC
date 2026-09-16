@@ -2,7 +2,7 @@
   "repository": "https://github.com/heygen-com/hyperframes.git",
   "revision": "e30992fdb8c6278db6afde2b5deeb7908835c524",
   "version": "0.8.37",
-  "patchSha256": "bec4f195302c57e41fb9a8b59c1eeec8315bcfa4fc3745104f5a1616eb9dacc2",
+  "patchSha256": "22c2a0c361bdcc43021bffc432a4a676e06bba90795e2be7562c29369d06bb6c",
   "files": {
     ".fallowrc.jsonc": "4f8220c5024e9f0dcca4f6d730edafecb4a69f84473e53c920abb431d8ebde1c",
     "packages/engine/package-subpaths.json": "f43009503ec4b2132f8a893ef770f1f994351eada28b61cda4a7222a86ab59db",
@@ -30,7 +30,7 @@
     "packages/producer/src/resources.ts": "ad1e449b6166353886e33a275f494beb87a91d4a7aae93cd301367bfaa4f99d2",
     "packages/producer/src/resources/admission.test.ts": "80f83a4781e29d2dc2ba8b32c70e5c025e800b33b593f9b2c6815958191621f0",
     "packages/producer/src/resources/admission.ts": "d19a72625013ab56292a91d5e53eb514e06562d9809faf440b170b67a5266b47",
-    "packages/producer/src/resources/installed-linux-cases.mjs": "6c3c75e80b8fbca91ea7fd5d74ff0e1ab34953cda4fbd772b42907f41321b564",
+    "packages/producer/src/resources/installed-linux-cases.mjs": "b9ad49b42c7ddf199c5558f478209f5028f33a0c0f8142ba6a55023fcd8f4d2f",
     "packages/producer/src/resources/installed-linux-evidence.test.ts": "b542ed9ada95f7aa5e96ce3042da000bd6c21730b91e641a32680e43c993f0fd",
     "packages/producer/src/resources/installed-linux.test.ts": "522b1cadb9a07e603d87a0f2dd179858b8ebfa17573841fac9aa65e35dbbd83b",
     "packages/producer/src/resources/linux.test.ts": "50c91e083374231c882981ca851663b003ac08ec595deca17b6156e156955eaf",
