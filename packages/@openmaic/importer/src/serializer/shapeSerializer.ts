@@ -17,6 +17,7 @@ import {
   type GradientFillData,
 } from './StyleResolver';
 import { renderTextBody, findPlaceholderNode, type RenderTextBodyOptions } from './textSerializer';
+import { isLinePreset } from '../shapes/linePresets';
 import { renderCustomGeometry } from '../shapes/customGeometry';
 import { getPresetShapePath, getMultiPathPreset, type PresetSubPath } from '../shapes/presets';
 import { emuToPt } from '../parser/units';
@@ -856,11 +857,7 @@ export async function renderShape(
     'bracepair',
   ]);
   const presetIsLine =
-    !!presetKey &&
-    (presetKey === 'line' ||
-      presetKey === 'lineinv' ||
-      presetKey.includes('connector') ||
-      outlineOnlyPresets.has(presetKey));
+    !!presetKey && (isLinePreset(presetKey) || outlineOnlyPresets.has(presetKey));
   const isConnectorShape = node.source.localName === 'cxnSp';
   const fillKind = node.fill?.localName;
   const hasAreaFill =
