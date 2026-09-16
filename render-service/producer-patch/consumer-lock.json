@@ -88,6 +88,17 @@
       "resolved": "https://registry.npmjs.org/@esbuild/linux-arm64/-/linux-arm64-0.25.12.tgz",
       "version": "0.25.12"
     },
+    "node_modules/@esbuild/linux-x64": {
+      "cpu": ["x64"],
+      "engines": {
+        "node": ">=18"
+      },
+      "integrity": "sha512-uqZMTLr/zR/ed4jIGnwSLkaHmPjOjJvnm6TVVitAa08SLS9Z0VM8wIRx7gWbJB5/J54YuIMInDquWyYvQLZkgw==",
+      "optional": true,
+      "os": ["linux"],
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.25.12.tgz",
+      "version": "0.25.12"
+    },
     "node_modules/@fontsource/archivo-black": {
       "funding": {
         "url": "https://github.com/sponsors/ayuhito"

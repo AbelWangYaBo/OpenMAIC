@@ -3,12 +3,29 @@ import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { verifyResourcePackage } from '../scripts/resource-package.mjs';
+import { verifyResourcePackage, requireLinuxPlatformLock } from '../scripts/resource-package.mjs';
 const directories: string[] = [];
 afterEach(() =>
   directories.splice(0).forEach((path) => rmSync(path, { recursive: true, force: true })),
 );
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+it.each(['arm64', 'x64'])('requires a matching frozen Linux %s dependency', (arch) => {
+  const lock = JSON.parse(
+    readFileSync(new URL('../producer-patch/consumer-lock.json', import.meta.url), 'utf8'),
+  );
+  const key = `node_modules/@esbuild/linux-${arch}`;
+  expect(requireLinuxPlatformLock(lock, arch)).toBe(key);
+  const row = lock.packages[key];
+  delete lock.packages[key];
+  expect(() => requireLinuxPlatformLock(lock, arch)).toThrow('platform lock');
+  lock.packages[key] = { ...row, version: '0.0.0' };
+  expect(() => requireLinuxPlatformLock(lock, arch)).toThrow('platform lock');
+  lock.packages[key] = { ...row, cpu: ['other'] };
+  expect(() => requireLinuxPlatformLock(lock, arch)).toThrow('platform lock');
+});
+it('rejects an unqualified architecture', () => {
+  expect(() => requireLinuxPlatformLock({}, 'riscv64')).toThrow('Unsupported');
+});
 function installed() {
   const root = mkdtempSync(join(tmpdir(), 'resource-package-'));
   directories.push(root);

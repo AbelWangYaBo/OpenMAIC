@@ -19,6 +19,8 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { requireLinuxPlatformLock } from './resource-package.mjs';
+import { restoreArchiveSource } from './resource-source.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const inputs = resolve(here, '../producer-patch');
@@ -26,12 +28,13 @@ const specification = JSON.parse(readFileSync(join(inputs, 'source.json'), 'utf8
 const patch = join(inputs, 'producer.patch');
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const args = process.argv.slice(2);
-const mode = args[0];
+const archive = ['--check-archive', '--build-archive'].includes(args[0]);
+const mode = archive ? args[0].replace('-archive', '') : args[0];
 const source = args[1] && resolve(args[1]);
 const output = args[2] && resolve(args[2]);
 if (!['--check', '--build'].includes(mode) || !source || (mode === '--build' && !output)) {
   throw new Error(
-    'Usage: node scripts/build-resource-producer.mjs --check SOURCE | --build SOURCE NEW_OUTPUT',
+    'Usage: node scripts/build-resource-producer.mjs --check[-archive] SOURCE | --build[-archive] SOURCE NEW_OUTPUT',
   );
 }
 if (hash(readFileSync(patch)) !== specification.patchSha256)
@@ -59,14 +62,30 @@ const gitConfig = [
   '-c',
   'filter.lfs.required=false',
 ];
-const base = run('git', ['rev-parse', 'HEAD'], source, true).toString().trim();
+const base = archive
+  ? specification.revision
+  : run('git', ['rev-parse', 'HEAD'], source, true).toString().trim();
 if (base !== specification.revision)
   throw new Error(`Expected source HEAD ${specification.revision}, got ${base}`);
 const scratch = mkdtempSync(join(tmpdir(), 'openmaic-producer-build-'));
 try {
   const checkout = join(scratch, 'source');
   mkdirSync(checkout);
-  if (mode === '--check') {
+  if (mode === '--build') {
+    if (
+      process.platform !== 'linux' ||
+      !['arm64', 'x64'].includes(process.arch) ||
+      Number(process.versions.node.split('.')[0]) < 22
+    )
+      throw new Error('Build requires an isolated Linux ARM64/x64 Node >=22 environment');
+    if (existsSync(output))
+      throw new Error('Output already exists; refusing to replace build evidence');
+    requireLinuxPlatformLock(JSON.parse(readFileSync(join(inputs, 'consumer-lock.json'), 'utf8')));
+  }
+  if (archive) {
+    restoreArchiveSource(source, checkout, readFileSync(join(inputs, 'upstream.commit')), base);
+    console.log('ARCHIVE_COMMIT_TREE_IDENTITY_PASS');
+  } else if (mode === '--check') {
     const tracked = new Set(
       run('git', ['ls-tree', '-r', '--name-only', base], source, true).toString().split('\n'),
     );
@@ -78,14 +97,6 @@ try {
     }
     run('git', ['init', '--quiet'], checkout);
   } else {
-    if (
-      process.platform !== 'linux' ||
-      process.arch !== 'arm64' ||
-      Number(process.versions.node.split('.')[0]) < 22
-    )
-      throw new Error('Build requires the isolated Linux ARM64 Node >=22 environment');
-    if (existsSync(output))
-      throw new Error('Output already exists; refusing to replace build evidence');
     run('git', [...gitConfig, 'clone', '--shared', '--no-checkout', source, checkout], scratch);
     run('git', [...gitConfig, 'checkout', '--detach', base], checkout);
   }
@@ -98,11 +109,19 @@ try {
   console.log('PATCH_SOURCE_IDENTITY_PASS');
   if (mode === '--build') {
     mkdirSync(output);
+    // Keep the already reviewed installed-package cases after the temporary
+    // source checkout is removed. Remote validation uses these exact bytes.
+    mkdirSync(join(output, 'verification'));
+    cpSync(
+      join(checkout, 'packages/producer/src/resources/installed-linux-cases.mjs'),
+      join(output, 'verification/installed-linux-cases.mjs'),
+    );
     run('bun', ['install', '--frozen-lockfile'], checkout);
     for (const name of ['parsers', 'lint', 'studio-server', 'core', 'engine', 'producer']) {
       run('bun', ['run', 'build'], join(checkout, 'packages', name));
     }
     const lock = JSON.parse(readFileSync(join(inputs, 'consumer-lock.json'), 'utf8'));
+    const platformPackage = requireLinuxPlatformLock(lock);
     lock.name = lock.packages[''].name = 'openmaic-budgeted-producer';
     const packages = {};
     for (const name of ['core', 'engine', 'parsers', 'lint', 'studio-server', 'producer']) {
@@ -171,8 +190,7 @@ try {
     for (const [path, row] of Object.entries(lock.packages)) {
       if (!path) continue;
       const installed = join(output, path, 'package.json');
-      if (row.optional && !existsSync(installed) && path !== 'node_modules/@esbuild/linux-arm64')
-        continue;
+      if (row.optional && !existsSync(installed) && path !== platformPackage) continue;
       if (JSON.parse(readFileSync(installed, 'utf8')).version !== row.version)
         throw new Error(`Installed dependency version mismatch: ${path}`);
     }
@@ -199,6 +217,9 @@ try {
           consumerLockSha256: hash(readFileSync(join(output, 'package-lock.json'))),
           node: process.version,
           arch: process.arch,
+          installedCasesSha256: hash(
+            readFileSync(join(output, 'verification/installed-linux-cases.mjs')),
+          ),
         },
         null,
         2,

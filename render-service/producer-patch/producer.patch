@@ -1,3 +1,16 @@
+diff --git a/.fallowrc.jsonc b/.fallowrc.jsonc
+index bb5010e28..e26d8f900 100644
+--- a/.fallowrc.jsonc
++++ b/.fallowrc.jsonc
+@@ -40,6 +40,8 @@
+     "packages/producer/src/services/shaderTransitionWorker.ts",
+     // Off-main-thread /health endpoint, spawned by path from healthWorker.ts.
+     "packages/producer/src/services/healthWorkerThread.ts",
++    // Native launcher execs this budgeted worker by installed file path.
++    "packages/producer/src/resourceWorker.ts",
+     // Test fixture worker, spawned by path via the pools' workerEntryPath
+     // option from the crash-recovery tests; has no import-graph referrer.
+     "packages/producer/src/services/__fixtures__/crashOnMessageWorker.mjs",
 diff --git a/packages/producer/README.md b/packages/producer/README.md
 index 7349071df..491b2d210 100644
 --- a/packages/producer/README.md
