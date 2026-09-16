@@ -1210,6 +1210,23 @@ export async function transformParsedToSlides(
                     out += '<br/>';
                     return;
                   }
+                  if (el.tagName === 'SPAN' && el.classList.contains('katex')) {
+                    // Treat generated math as one unit. Flattening its MathML,
+                    // TeX annotation and visual spans duplicates the formula
+                    // and destroys fractions/superscripts. Re-render the source
+                    // instead of trusting arbitrary markup in the input HTML.
+                    const latex = el.querySelector(
+                      'annotation[encoding="application/x-tex"]',
+                    )?.textContent;
+                    if (latex) {
+                      try {
+                        out += katex.renderToString(latex, { throwOnError: true, trust: false });
+                      } catch {
+                        out += escapeText(latex);
+                      }
+                      return;
+                    }
+                  }
                   if (el.tagName === 'SPAN') {
                     const st = keepRunStyle(el);
                     const inner = serializeInline(el);
