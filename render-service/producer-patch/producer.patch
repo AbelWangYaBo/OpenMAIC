@@ -494,32 +494,18 @@ index 874db94..c8534aa 100644
      return "published";
    } catch (error) {
 diff --git a/packages/producer/README.md b/packages/producer/README.md
-index 7349071..b9340e2 100644
+index 7349071..8fbeb1e 100644
 --- a/packages/producer/README.md
 +++ b/packages/producer/README.md
-@@ -32,6 +32,124 @@ const result = await executeRenderJob(job, (progress) => {
+@@ -32,6 +32,109 @@ const result = await executeRenderJob(job, (progress) => {
  console.log(result.outputPath); // ./output.mp4
  ```
  
 +### Render with admission and per-task budgets (Linux)
 +
-+This implementation is a draft for review. The installed package passed Linux
-+ARM64 native compilation/loading, initial in-domain launch, aggregate CPU/memory
-+limits and lifecycle checks. The real Producer passed consecutive normal exports,
-+media-phase OOM, cancellation, deadline, supervisor death, guardian death and
-+unknown-reference cases. Normal exports used a 1-second, 200×200, 1 fps composition;
-+media fault cases used that composition at 30 fps after observing a live Chrome
-+renderer and encoding FFmpeg. Media OOM was injected by lowering that task's limit
-+from 768 MiB to 64 MiB; this is not a general workload qualification.
-+
-+Verified cleanup returns reservations and permits another export on the same
-+owner. Missing cleanup receipts or unknown references retain reservations and
-+close admission. All fault cases preserved the previous output. A dead supervisor's
-+session remains unavailable for reuse until its platform owner removes it.
-+These results cover the earlier tested package and Linux environment. The current
-+ancestor-pressure guard, structured failure accounting and packaging corrections
-+are pending a fresh installed-package run; release/CI and supported-architecture
-+compatibility remain required before merge.
++This opt-in API requires qualification of the exact installed package on the
++supported Linux target. Portable tests and results from older packages do not
++qualify a new candidate.
 +
 +The experimental `@hyperframes/producer/resources` entry accepts the existing
 +`RenderRequest` and reserves CPU bandwidth, memory and an active slot before
@@ -562,12 +548,11 @@ index 7349071..b9340e2 100644
 +```
 +
 +The platform must supply a dedicated Node >=22 supervisor process running as
-+root **outside** an empty, exclusive cgroup v2 task delegation, with CPU and
-+memory controllers, `clone3(CLONE_INTO_CGROUP)`, pidfds, and mount/cgroup namespaces.
-+Its ancestor PID allowance must cover the media pipeline's threads. The minimal
-+Linux test reached 109 concurrent tasks; a 64-task service cap prevented Chromium
-+startup, while a finite 256-task cap passed with the same CPU/memory budgets.
-+This is a tested environment setting, not a universal thread requirement.
++root **outside** an empty, exclusive cgroup v2 task delegation, with CPU, memory
++and pids controllers, `clone3(CLONE_INTO_CGROUP)`, pidfds, and mount/cgroup namespaces.
++Each attempt's finite `taskPidsMax` is written and read back before launch.
++The platform must reserve separate PID headroom for the supervisor and guardian
++under shared ancestors; the example limit requires workload qualification.
 +The worker runs with the configured non-root UID/GID, no capabilities and a
 +read-only cgroup view. `TMPDIR` and Puppeteer profiles use a short `/proc/<worker>/fd/4`
 +path to the task-owned scratch directory, so long output paths do not overflow
@@ -4193,41 +4178,6 @@ index e8ef90d..d0d27ee 100644
  import { dirname, isAbsolute, join, resolve } from "node:path";
  import { parseHTML } from "linkedom";
  import { parseAnimatedGifMetadata, type AnimatedGifMetadata } from "@hyperframes/core";
-diff --git a/packages/producer/src/services/audioExtractor.ts b/packages/producer/src/services/audioExtractor.ts
-index 42208f1..d2bcf0c 100644
---- a/packages/producer/src/services/audioExtractor.ts
-+++ b/packages/producer/src/services/audioExtractor.ts
-@@ -1,3 +1,4 @@
-+import { removeRenderTemporaryPath as rmSync } from "@hyperframes/engine/temporary-cleanup";
- // fallow-ignore-file unused-file code-duplication complexity
- /**
-  * Audio Extractor Service
-@@ -7,7 +8,7 @@
-  */
- 
- import { spawn } from "node:child_process";
--import { existsSync, mkdirSync, rmSync, readFileSync } from "node:fs";
-+import { existsSync, mkdirSync, readFileSync } from "node:fs";
- import { join, dirname } from "node:path";
- import { getFfmpegBinary, trackChildProcess } from "@hyperframes/engine";
- 
-diff --git a/packages/producer/src/services/compilationRunner.ts b/packages/producer/src/services/compilationRunner.ts
-index ad436f3..0898d0d 100644
---- a/packages/producer/src/services/compilationRunner.ts
-+++ b/packages/producer/src/services/compilationRunner.ts
-@@ -1,10 +1,11 @@
-+import { removeRenderTemporaryPath as rmSync } from "@hyperframes/engine/temporary-cleanup";
- /**
-  * Compilation Test Runner
-  *
-  * Orchestrates compilation tests: compiles input HTML, compares to golden files.
-  */
- 
--import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync, mkdirSync } from "fs";
-+import { readFileSync, writeFileSync, existsSync, mkdtempSync, mkdirSync } from "fs";
- import { join } from "path";
- import { tmpdir } from "os";
- import { compileForRender } from "./htmlCompiler.js";
 diff --git a/packages/producer/src/services/fontCompression.ts b/packages/producer/src/services/fontCompression.ts
 index ad4c5cf..b8cfec7 100644
 --- a/packages/producer/src/services/fontCompression.ts

@@ -71,9 +71,18 @@ Do not inherit results from older fixture runs.
 The cross-review cleanup/PID revision has **NOT_RUN** installed Linux evidence.
 Portable filesystem/owner regressions do not establish kernel enforcement or
 new package qualification. Historical results remain evidence only for their
-original source/package hashes. In addition to these new cases, the review's
-native deletion-failure and concurrent A-reference/B-completion evidence remain
-open; neither is implied by the portable rename-failure regression.
+original source/package hashes. Code review closure does not close these runtime
+requirements. Use the following finite acceptance matrix; do not add a new test
+framework or infer coverage from a case name alone.
+
+| Contract | Existing check and remaining evidence |
+| --- | --- |
+| Normal return and recovery | Run consecutive real exports and cleanable-failure recovery with the new installed package. Retained temporary objects must fit the unchanged budgets; reservations return, retained inputs and previous artifacts remain readable. |
+| Unknown reference during normal completion | Run `real-unknown-reference-normal`; require reference rejection after normal worker exit, quarantine, closed admission and no replacement of the previous artifact. |
+| Per-attempt PID enforcement | Run `pids-limit`; require kernel EAGAIN, task-local PID events, descendant drain and successful guardian cleanup with control-domain headroom. |
+| Failed cleanup cannot return a reservation | `renderExecutionContext.test.ts` covers a real filesystem rename failure without unlink fallback; `supervisor.test.ts` covers injected disposer failure and post-publication directory-removal failure retaining reservations. These cover their respective boundaries, not an actual failed unlink/rmdir in the native guardian. Keep that concrete runtime path open until covered by identified evidence; add only a targeted case in the existing runner if needed, not a separate native suite. |
+| A retains a reference while B completes | Admission unit tests cover reservation arithmetic only. Still demonstrate a real retained A object while an already-active B completes, preserving A's reservation and B's independent settlement. Do not admit new work after quarantine or add HTTP concurrency for this check. |
+| S restart and ownership transfer | Existing checks reject reuse of an unfinished session. Still demonstrate platform revocation of the old owner's launch rights, explicit takeover or whole-envelope replacement, then a new S serving successfully. This is a bounded platform lifecycle check, not a requirement for a new automatic recovery service or persistent queue. |
 
 ## OpenMAIC installed service
 
