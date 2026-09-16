@@ -23,6 +23,7 @@ import type {
   PPTVideoElement,
   PPTAudioElement,
   ChartOptions,
+  ImportedChartStyle,
   Gradient,
   ImageElementFilters,
 } from '@openmaic/dsl';
@@ -1413,10 +1414,35 @@ export async function transformParsedToSlides(
             default:
           }
 
+          const importedStyle = (el as typeof el & { importedStyle?: ImportedChartStyle })
+            .importedStyle;
           slide.elements.push({
             type: 'chart',
             id: nanoid(10),
             chartType: chartType,
+            importedStyle: importedStyle
+              ? {
+                  ...importedStyle,
+                  categoryAxis: importedStyle.categoryAxis
+                    ? {
+                        ...importedStyle.categoryAxis,
+                        labelFontSize:
+                          importedStyle.categoryAxis.labelFontSize === undefined
+                            ? undefined
+                            : importedStyle.categoryAxis.labelFontSize * ratio,
+                      }
+                    : undefined,
+                  valueAxis: importedStyle.valueAxis
+                    ? {
+                        ...importedStyle.valueAxis,
+                        labelFontSize:
+                          importedStyle.valueAxis.labelFontSize === undefined
+                            ? undefined
+                            : importedStyle.valueAxis.labelFontSize * ratio,
+                      }
+                    : undefined,
+                }
+              : undefined,
             width: el.width,
             height: el.height,
             left: el.left,

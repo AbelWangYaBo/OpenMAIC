@@ -97,3 +97,85 @@ describe('chartSerializer', () => {
     });
   });
 });
+
+it('preserves explicit bar style and series label deletion over chart defaults', () => {
+  const xml = `<c:chartSpace ${NS}><c:chart><c:plotArea>
+    <c:layout><c:manualLayout><c:layoutTarget val="inner"/><c:xMode val="edge"/><c:yMode val="edge"/><c:x val="0.02"/><c:y val="0.05"/><c:w val="0.96"/><c:h val="0.8"/></c:manualLayout></c:layout>
+    <c:barChart><c:ser><c:dLbls><c:delete val="1"/></c:dLbls><c:dPt><c:idx val="2"/><c:spPr><a:gradFill><a:gsLst><a:gs pos="100000"><a:srgbClr val="FFFFFF"/></a:gs><a:gs pos="0"><a:srgbClr val="FF8800"/></a:gs></a:gsLst><a:lin ang="5400000"/></a:gradFill></c:spPr></c:dPt></c:ser><c:dLbls><c:showVal val="1"/></c:dLbls><c:gapWidth val="150"/></c:barChart>
+    <c:catAx><c:delete val="0"/><c:majorGridlines/><c:txPr><a:p><a:pPr><a:defRPr sz="1600" b="1"/></a:pPr></a:p></c:txPr></c:catAx>
+    <c:valAx><c:delete val="1"/><c:majorUnit val="1"/></c:valAx>
+  </c:plotArea></c:chart></c:chartSpace>`;
+  const ctx = minimalCtx();
+  ctx.presentation = { charts: new Map([['ppt/charts/chart1.xml', parseXml(xml)]]) } as any;
+  const el = chartToElement(chartNode(), ctx, 0) as any;
+  expect(el.importedStyle.series[0].showValue).toBe(false);
+  expect(el.importedStyle.series[0].pointFills['2'].colorStops).toEqual([
+    { offset: 0, color: '#FF8800' },
+    { offset: 1, color: '#FFFFFF' },
+  ]);
+  expect(el.importedStyle.valueAxis.show).toBe(false);
+  expect(el.importedStyle.valueAxis.majorUnit).toBe(1);
+  expect(el.importedStyle.categoryAxis.labelFontSize).toBe(16);
+  expect(el.importedStyle.plotArea.w).toBe(0.96);
+});
+
+it('carries chart formatting through the slide adapter and scales axis text', async () => {
+  const { transformParsedToSlides } =
+    await import('../src/import-pipeline/transformParsedToSlides');
+  const { createMockImportContext } = await import('../src/import-pipeline/mockContext');
+  const { slides } = await transformParsedToSlides(
+    {
+      size: { width: 960, height: 540 },
+      themeColors: [],
+      slides: [
+        {
+          fill: { type: 'color', value: '#fff' },
+          note: '',
+          layoutElements: [],
+          elements: [
+            {
+              type: 'chart',
+              chartType: 'barChart',
+              barDir: 'col',
+              left: 0,
+              top: 0,
+              width: 400,
+              height: 200,
+              order: 1,
+              colors: ['#123456'],
+              data: [{ key: 'A', values: [{ x: '0', y: 0.6 }], xlabels: { '0': 'Example' } }],
+              importedStyle: {
+                series: [{ showValue: false, fill: '#123456' }],
+                categoryAxis: { labelFontSize: 16 },
+                valueAxis: { show: false },
+              },
+            },
+          ],
+        },
+      ],
+    } as any,
+    createMockImportContext({ ratio: 2 }),
+  );
+  const chart = slides[0].elements[0];
+  if (chart.type !== 'chart') throw new Error('expected chart');
+  expect(chart.importedStyle?.series[0].fill).toBe('#123456');
+  expect(chart.importedStyle?.categoryAxis?.labelFontSize).toBe(32);
+  expect(chart.importedStyle?.valueAxis?.show).toBe(false);
+});
+it('resolves picture fills through chart-local relationships and reads percent format', () => {
+  const xml = `<c:chartSpace ${NS} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><c:chart><c:plotArea><c:barChart><c:ser><c:dPt><c:idx val="1"/><c:spPr><a:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></a:blipFill></c:spPr></c:dPt></c:ser></c:barChart><c:valAx><c:numFmt formatCode="0%"/></c:valAx></c:plotArea></c:chart></c:chartSpace>`;
+  const ctx = minimalCtx();
+  ctx.presentation = {
+    charts: new Map([['ppt/charts/chart1.xml', parseXml(xml)]]),
+    chartRels: new Map([
+      [
+        'ppt/charts/chart1.xml',
+        new Map([['rId2', { type: 'image', target: '../media/test.png' }]]),
+      ],
+    ]),
+    media: new Map([['ppt/media/test.png', new Uint8Array([1, 2, 3])]]),
+  } as any;
+  const el = chartToElement(chartNode(), ctx, 0) as any;
+  expect(el.importedStyle.series[0].pointImages['1']).toBe('data:image/png;base64,AQID');
+  expect(el.importedStyle.valueAxis.numberFormat).toBe('0%');
+});

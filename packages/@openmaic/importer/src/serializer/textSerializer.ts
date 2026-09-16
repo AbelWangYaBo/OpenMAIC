@@ -221,6 +221,7 @@ function getPlaceholderLstStyle(phNode: SafeXmlNode): SafeXmlNode | undefined {
  * Later calls override earlier values (higher priority wins).
  */
 interface MergedParagraphStyle {
+  hangingPunctuation?: boolean;
   align?: string;
   marginLeft?: number;
   textIndent?: number;
@@ -305,6 +306,10 @@ function buildMergedParagraphStyle(
 
 function mergeParagraphProps(target: MergedParagraphStyle, pPr: SafeXmlNode): void {
   if (!pPr.exists()) return;
+  const hangingPunct = pPr.attr('hangingPunct');
+  if (hangingPunct !== undefined) {
+    target.hangingPunctuation = hangingPunct === '1' || hangingPunct === 'true';
+  }
 
   const algn = pPr.attr('algn');
   if (algn) target.align = algn;
@@ -966,9 +971,71 @@ export interface RenderTextBodyOptions {
 }
 
 /**
- * Same contract as `TextRenderer.renderTextBody`, but returns an HTML string for `Shape.content` / `Text.content`
- * (types.ts / README) instead of mutating a DOM `container`.
+ * WPS displays some CJK label lists with continuation spaces aligned to the
+ * label's full-width character column. This is a layout inference, not a font
+ * space metric: require repeated, unambiguous alignment and enough frame room.
+ * In particular, do not widen arbitrary leading spaces or tab-based titles.
  */
+function labelContinuationIndent(
+  textBody: TextBody,
+  placeholder: PlaceholderInfo | undefined,
+  ctx: RenderContext,
+  frameWidthPx: number | undefined,
+): { spaces: number; widthPx: number } | undefined {
+  if (!frameWidthPx || textBody.paragraphs.length < 3) return;
+  const direction = textBody.bodyProperties?.attr('vert');
+  if (direction && direction !== 'horz') return;
+  if ((textBody.bodyProperties?.numAttr('numCol') ?? 1) !== 1) return;
+  const texts = textBody.paragraphs.map((p) => p.runs.map((r) => r.text ?? '').join(''));
+  const label = texts[0].match(/^([\u3400-\u9fff]{1,12}：)[\u3400-\u9fff]+$/)?.[1];
+  if (!label) return;
+  const spaces = label.length * 2;
+  const continuation = new RegExp(`^ {${spaces}}[\\u3400-\\u9fff]+$`);
+  if (!texts.slice(1).every((text) => continuation.test(text))) return;
+
+  let typography: string | undefined;
+  let fontSizePt = 12;
+  const category = getPlaceholderCategory(placeholder);
+  for (const paragraph of textBody.paragraphs) {
+    const merged = buildMergedParagraphStyle(textBody, paragraph, category, placeholder, ctx);
+    if (
+      (merged.align && merged.align !== 'l') ||
+      merged.marginLeft ||
+      merged.textIndent ||
+      merged.bulletChar ||
+      merged.bulletAutoNum ||
+      merged.tabStopsPx?.length
+    )
+      return;
+    for (const run of paragraph.runs) {
+      if (run.ommlXml || (run as { fldType?: string }).fldType) return;
+      const style: MergedRunStyle = {};
+      for (const props of merged.defRPrs ?? []) mergeRunProps(style, props, ctx);
+      if (run.properties) mergeRunProps(style, run.properties, ctx);
+      if (style.letterSpacingPt || style.baseline) return;
+      fontSizePt = style.fontSize ?? 12;
+      const key = JSON.stringify([
+        fontSizePt,
+        style.fontFamily ?? '',
+        !!style.bold,
+        !!style.italic,
+      ]);
+      if (typography !== undefined && typography !== key) return;
+      typography = key;
+    }
+  }
+  const emPx = (fontSizePt * 4) / 3;
+  const bodyPr = textBody.bodyProperties;
+  const insetPx = emuToPx((bodyPr?.numAttr('lIns') ?? 91440) + (bodyPr?.numAttr('rIns') ?? 91440));
+  const longestLine = Math.max(
+    texts[0].length,
+    ...texts.slice(1).map((t) => label.length + t.length - spaces),
+  );
+  if (longestLine * emPx > frameWidthPx - insetPx) return;
+  return { spaces, widthPx: label.length * emPx };
+}
+
+/** Render the text body as HTML, preserving inherited paragraph and run styles. */
 export function renderTextBody(
   textBody: TextBody | undefined,
   placeholder: PlaceholderInfo | undefined,
@@ -991,6 +1058,9 @@ export function renderTextBody(
 
   let html = '';
   const textWarp = getSupportedTextWarp(textBody);
+  const labelIndent = options?.cellMargins
+    ? undefined
+    : labelContinuationIndent(textBody, placeholder, ctx, options?.frameWidthPx);
 
   if (textWarp) {
     html = renderTextWarp(textBody, category, placeholder, ctx, options, textWarp);
@@ -1101,6 +1171,10 @@ export function renderTextBody(
         }
       }
 
+      if (labelIndent && !isFirstPara) {
+        leadingStripChars = labelIndent.spaces;
+      }
+
       let finalMarginLeftPx: number | undefined;
       if (effectiveMarginLeft !== undefined || leadingFoldPx > 0 || leadingFoldEm > 0) {
         if (leadingFoldPx > 0 || leadingFoldEm > 0) {
@@ -1122,6 +1196,10 @@ export function renderTextBody(
           finalMarginLeftPx = effectiveMarginLeft;
           paraCssParts.push(`margin-left: ${effectiveMarginLeft}px`);
         }
+      }
+      // Keep this in pt so the canvas import scales it together with the text.
+      if (labelIndent && !isFirstPara) {
+        paraCssParts.push(`margin-left: ${(labelIndent.widthPx * 3) / 4}pt`);
       }
       // text-indent: when a leading tab folded but its stop is at/behind marL
       // (leadingFoldPx === 0), the tab still nudges the FIRST line forward to the
@@ -1157,6 +1235,39 @@ export function renderTextBody(
         const sz = paragraph.runs[0].properties.numAttr('sz');
         if (sz !== undefined) effectiveFontSize = sz / 100;
       }
+
+      // Office may hang the blank half of a final full-width punctuation mark.
+      // Only recover a short CJK line that fits after this half-em compression;
+      // do not disable wrapping or resize the text frame for ordinary prose.
+      const paragraphText = paragraph.runs.map((r) => r.text ?? '').join('');
+      const bp = textBody.bodyProperties;
+      const availableWidth =
+        (options?.frameWidthPx ?? 0) -
+        emuToPx((bp?.numAttr('lIns') ?? 91440) + (bp?.numAttr('rIns') ?? 91440));
+      const emWidth = (effectiveFontSize * 4) / 3;
+      const compactFinalPunctuation =
+        merged.hangingPunctuation === true &&
+        !options?.cellMargins &&
+        !noWrap &&
+        (!bp?.attr('vert') || bp.attr('vert') === 'horz') &&
+        (bp?.numAttr('numCol') ?? 1) === 1 &&
+        (bp?.child('normAutofit').numAttr('fontScale') ?? 100000) === 100000 &&
+        !merged.marginLeft &&
+        !merged.textIndent &&
+        !merged.bulletChar &&
+        !merged.bulletAutoNum &&
+        /^[\u3400-\u9fff]{1,12}[，。！？；：、]$/.test(paragraphText) &&
+        paragraphText.length * emWidth > availableWidth &&
+        (paragraphText.length - 0.5) * emWidth <= availableWidth &&
+        !(merged.defRPrs ?? []).some((r) => r.numAttr('spc') || r.numAttr('baseline')) &&
+        paragraph.runs.every(
+          (r) =>
+            !r.ommlXml &&
+            !r.properties?.numAttr('spc') &&
+            !r.properties?.numAttr('baseline') &&
+            (r.properties?.numAttr('sz') ?? effectiveFontSize * 100) === effectiveFontSize * 100,
+        );
+      const lastTextRun = [...paragraph.runs].reverse().find((r) => !!r.text);
 
       // Empty paragraph (no visible runs → renders as a bare <br/>): PowerPoint
       // sizes the blank line from its end-of-paragraph mark (endParaRPr). Without
@@ -1573,7 +1684,11 @@ export function renderTextBody(
             }
           }
         }
-        const inner = formatRunTextForHtml(runText);
+        const inner =
+          compactFinalPunctuation && run === lastTextRun
+            ? formatRunTextForHtml(runText.slice(0, -1)) +
+              `<span style="display:inline-block;width:0.5em">${escapeHtml(runText.slice(-1))}</span>`
+            : formatRunTextForHtml(runText);
         const tabStyleSuffix = runText.includes('\t') ? ';white-space: pre' : '';
 
         const styleStr = runStylesToCssString(runStyle, run, options, ctx) + tabStyleSuffix;
@@ -1663,7 +1778,7 @@ function runStylesToCssString(
   }
 
   const decorations: string[] = [];
-  if (runStyle.underline) decorations.push('underline');
+  if (runStyle.underline ?? !!runStyle.hlinkClick) decorations.push('underline');
   if (runStyle.strikethrough) decorations.push('line-through');
   if (decorations.length > 0) {
     parts.push(`text-decoration: ${decorations.join(' ')}`);
@@ -1686,7 +1801,17 @@ function runStylesToCssString(
   // Hyperlink default color: when the run is a hyperlink and has no explicit
   // solidFill on its own rPr, use the theme's hlink color.  This matches
   // PowerPoint behaviour where hyperlink text defaults to the hlink scheme color.
-  if (runStyle.hlinkClick && !hasExplicitRunColor) {
+  const runFill = run.properties?.child('solidFill');
+  // WPS auto-styles visible web addresses carrying an unmodified tx1 fill.
+  // Limit this compatibility fallback to exact URL labels; preserve named
+  // navigation links, tx2, RGB, accent, transformed fills and gradients.
+  const scheme = runFill?.child('schemeClr');
+  const isPlainTextThemeColor =
+    scheme?.attr('val') === 'tx1' &&
+    scheme.allChildren().length === 0 &&
+    run.text === runStyle.hlinkClick &&
+    /^https?:\/\//i.test(run.text ?? '');
+  if (runStyle.hlinkClick && (!hasExplicitRunColor || isPlainTextThemeColor)) {
     const hlinkHex = ctx.theme.colorScheme.get('hlink');
     if (hlinkHex) {
       effectiveColor = hlinkHex.startsWith('#') ? hlinkHex : `#${hlinkHex}`;

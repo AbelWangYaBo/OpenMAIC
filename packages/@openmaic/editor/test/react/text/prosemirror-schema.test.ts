@@ -6,6 +6,18 @@ import {
 } from '../../../src/react/text/prosemirror/document';
 
 describe('renderer ProseMirror schema', () => {
+  it('preserves imported link styles and compact trailing punctuation', () => {
+    const output = serializeTextDocument(
+      createTextDocument(
+        '<div style="padding:4.8px 9.6px"><p>课前调研<span style="display:inline-block;width:0.5em">：</span></p><p><a href="https://example.com" style="color:#4472C4;text-decoration:underline">link</a></p></div>',
+      ),
+    );
+    expect(output).toContain('width: 0.5em');
+    expect(output).toContain('display: inline-block');
+    expect(output).toContain('rgb(68, 114, 196)');
+    expect(output).toContain('text-decoration: underline');
+    expect(output).toContain('padding: 4.8px 9.6px');
+  });
   it('round-trips legacy rich-text nodes and marks', () => {
     const html =
       '<blockquote><p style="text-align: center"><a href="https://maic.chat"><strong><u><span style="font-size: 28px; color: #ff0000">MAIC</span></u></strong></a></p></blockquote><ol><li><p>One</p></li></ol>';

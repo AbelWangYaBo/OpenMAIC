@@ -4,7 +4,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import type { PPTTextElement } from '@openmaic/dsl';
 import { useElementShadow } from '../shared/useElementShadow';
 import { ElementOutline } from '../shared/ElementOutline';
-import { preservesPlainTextLineBreaks } from '../../utils/richText';
+import { hasTextFrameInsets, preservesPlainTextLineBreaks } from '../../utils/richText';
 
 export interface BaseTextElementProps {
   elementInfo: PPTTextElement;
@@ -60,7 +60,7 @@ export function BaseTextElement({ elementInfo, target, renderContent }: BaseText
           style={{
             position: 'relative',
             boxSizing: 'border-box',
-            padding: '10px',
+            padding: hasTextFrameInsets(elementInfo.content) ? 0 : '10px',
             overflowWrap: 'break-word',
             width: elementInfo.vertical ? 'auto' : '100%',
             height: elementInfo.vertical ? '100%' : 'auto',
