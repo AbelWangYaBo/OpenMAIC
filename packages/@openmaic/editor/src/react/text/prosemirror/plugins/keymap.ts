@@ -1,4 +1,5 @@
 import { splitListItem, liftListItem, sinkListItem } from 'prosemirror-schema-list';
+import { splitListItemInInlineContainer } from '../commands/splitListItemInInlineContainer';
 import type { Schema } from 'prosemirror-model';
 import { undo, redo } from 'prosemirror-history';
 import { undoInputRule } from 'prosemirror-inputrules';
@@ -36,6 +37,7 @@ export const buildKeymap = (schema: Schema) => {
     'Enter',
     chainCommands(
       splitListItem(schema.nodes.list_item),
+      splitListItemInInlineContainer(schema.nodes.list_item),
       newlineInCode,
       createParagraphNear,
       liftEmptyBlock,
