@@ -47,6 +47,107 @@ const pptxTabColumn: NodeSpec = {
   ],
 };
 
+// A fixed-width box owns its contents, even when font marks differ inside it.
+// Keeping it as a node prevents font-mark ordering from splitting the box.
+const inlineTextBox: NodeSpec = {
+  inline: true,
+  group: 'inline',
+  content: 'inline*',
+  selectable: false,
+  attrs: {
+    width: {},
+    minWidth: { default: '' },
+    textAlign: { default: '' },
+    height: { default: '' },
+    verticalAlign: { default: '' },
+    margin: { default: '' },
+    marginTop: { default: '' },
+    marginRight: { default: '' },
+    marginBottom: { default: '' },
+    marginLeft: { default: '' },
+    padding: { default: '' },
+    paddingTop: { default: '' },
+    paddingRight: { default: '' },
+    paddingBottom: { default: '' },
+    paddingLeft: { default: '' },
+    textIndent: { default: '' },
+    boxSizing: { default: '' },
+  },
+  parseDOM: [
+    {
+      tag: 'span',
+      priority: 60,
+      getAttrs: (dom) => {
+        const element = dom as HTMLElement;
+        const {
+          display,
+          width,
+          minWidth,
+          height,
+          verticalAlign,
+          margin,
+          marginTop,
+          marginRight,
+          marginBottom,
+          marginLeft,
+          padding,
+          paddingTop,
+          paddingRight,
+          paddingBottom,
+          paddingLeft,
+          textIndent,
+          boxSizing,
+        } = element.style;
+        if (
+          (!element.textContent?.trim() && element.dataset.inlineTextBox !== 'true') ||
+          display !== 'inline-block' ||
+          !CSS_LENGTH_PATTERN.test(width)
+        )
+          return false;
+        return {
+          width,
+          minWidth: minWidth === 'max-content' ? minWidth : '',
+          textAlign: element.style.textAlign === 'left' ? 'left' : '',
+          height,
+          verticalAlign,
+          margin,
+          marginTop,
+          marginRight,
+          marginBottom,
+          marginLeft,
+          padding,
+          paddingTop,
+          paddingRight,
+          paddingBottom,
+          paddingLeft,
+          textIndent: textIndent === '0px' || textIndent === '0' ? '0' : '',
+          boxSizing: boxSizing === 'border-box' ? boxSizing : '',
+        };
+      },
+    },
+  ],
+  toDOM: (mark) => {
+    let style = `display: inline-block; width: ${mark.attrs.width};`;
+    if (mark.attrs.minWidth === 'max-content') style += 'min-width: max-content;';
+    if (mark.attrs.textAlign === 'left') style += 'text-align: left;';
+    if (mark.attrs.height) style += `height: ${mark.attrs.height};`;
+    if (mark.attrs.verticalAlign) style += `vertical-align: ${mark.attrs.verticalAlign};`;
+    if (mark.attrs.margin) style += `margin: ${mark.attrs.margin};`;
+    if (mark.attrs.marginTop) style += `margin-top: ${mark.attrs.marginTop};`;
+    if (mark.attrs.marginRight) style += `margin-right: ${mark.attrs.marginRight};`;
+    if (mark.attrs.marginBottom) style += `margin-bottom: ${mark.attrs.marginBottom};`;
+    if (mark.attrs.marginLeft) style += `margin-left: ${mark.attrs.marginLeft};`;
+    if (mark.attrs.padding) style += `padding: ${mark.attrs.padding};`;
+    if (mark.attrs.paddingTop) style += `padding-top: ${mark.attrs.paddingTop};`;
+    if (mark.attrs.paddingRight) style += `padding-right: ${mark.attrs.paddingRight};`;
+    if (mark.attrs.paddingBottom) style += `padding-bottom: ${mark.attrs.paddingBottom};`;
+    if (mark.attrs.paddingLeft) style += `padding-left: ${mark.attrs.paddingLeft};`;
+    if (mark.attrs.textIndent) style += 'text-indent: 0;';
+    if (mark.attrs.boxSizing) style += `box-sizing: ${mark.attrs.boxSizing};`;
+    return ['span', { 'data-inline-text-box': 'true', style }, 0];
+  },
+};
+
 const inlineSpacer: NodeSpec = {
   inline: true,
   group: 'inline',
@@ -340,6 +441,7 @@ const schemaNodes = {
   list_item: listItem,
   inline_spacer: inlineSpacer,
   pptx_tab_column: pptxTabColumn,
+  inline_text_box: inlineTextBox,
 };
 
 export default schemaNodes;

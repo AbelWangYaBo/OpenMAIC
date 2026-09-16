@@ -208,3 +208,63 @@ describe('renderer ProseMirror schema', () => {
     expect(output).toContain('A&nbsp;<br>B &amp; C');
   });
 });
+
+it('keeps font-size wrappers from adding a host-font line box', () => {
+  const source =
+    '<p style="line-height:1"><a href="https://example.com" style="font-family:Arial;font-size:24px;text-decoration:underline">海龟编辑器 (codemao.cn)</a></p>';
+  const doc = createTextDocument(source);
+  const host = document.createElement('div');
+  host.innerHTML = serializeTextDocument(doc);
+  const size = host.querySelector<HTMLElement>('span[style*="font-size"]')!;
+  // A font-size wrapper outside the family wrapper uses the host system font.
+  // Even with no direct text, that inline box shifts the Arial baseline by ~1px.
+  expect(size.style.display).not.toBe('contents');
+  expect(size.parentElement?.style.fontFamily.replaceAll('"', '')).toBe('Arial');
+  expect(host.querySelector('a')?.textContent).toBe('海龟编辑器 (codemao.cn)');
+  expect(createTextDocument(host.innerHTML).eq(doc)).toBe(true);
+});
+
+it('preserves a shared inline-block width across mixed font families', () => {
+  const html =
+    '<p><span style="display:inline-block;width:100px"><span style="font-family:Arial">A</span><span style="font-family:Times">B</span></span>C</p>';
+  const host = document.createElement('div');
+  host.innerHTML = serializeTextDocument(createTextDocument(html));
+  const blocks = host.querySelectorAll<HTMLElement>('span[style*="inline-block"]');
+  expect(blocks).toHaveLength(1);
+  expect(blocks[0].textContent).toBe('AB');
+  expect(blocks[0].style.width).toBe('100px');
+});
+
+it('preserves the font context of relative inline-block dimensions', () => {
+  const html =
+    '<p><span style="font-size:24px;font-family:Arial"><span style="display:inline-block;width:2em">AB</span></span>C</p>';
+  const doc = createTextDocument(html);
+  const host = document.createElement('div');
+  host.innerHTML = serializeTextDocument(doc);
+  const box = host.querySelector<HTMLElement>('span[style*="inline-block"]')!;
+  expect(box.style.width).toBe('2em');
+  expect(createTextDocument(host.innerHTML).eq(doc)).toBe(true);
+});
+
+it('applies relative font sizing once around an editable inline box', () => {
+  const html =
+    '<p><span style="font-size:2em;font-family:Arial"><span style="display:inline-block;width:2em">AB</span></span>C</p>';
+  const doc = createTextDocument(html);
+  const host = document.createElement('div');
+  host.innerHTML = serializeTextDocument(doc);
+  expect(host.querySelectorAll('span[style*="font-size"]')).toHaveLength(1);
+  const box = doc.firstChild!.firstChild!;
+  expect(box.type.name).toBe('inline_text_box');
+  expect(box.textContent).toBe('AB');
+  expect(createTextDocument(host.innerHTML).eq(doc)).toBe(true);
+});
+
+it('retains an editable inline box and its spacing after deleting its text', () => {
+  const doc = createTextDocument(
+    '<p><span style="display:inline-block;width:30px;height:24px;margin:2px;padding:3px">A</span></p>',
+  );
+  const empty = EditorState.create({ doc }).tr.delete(2, 3).doc;
+  const restored = createTextDocument(serializeTextDocument(empty));
+  expect(restored.eq(empty)).toBe(true);
+  expect(restored.firstChild!.firstChild!.type.name).toBe('inline_text_box');
+});
