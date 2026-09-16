@@ -735,13 +735,50 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
     const prompts = mocks.legacyChildPrompts.join('\n');
     expect(prompts).toContain('too-large');
     // Not truncated: no fragment of the oversized body survives.
-    expect(prompts).not.toContain('object-399');
+    expect(prompts).not.toContain('object-17');
     // The relationship prose degrades with the body it describes.
     expect(prompts).toContain('Current relationship evidence is unavailable');
     expect(prompts).not.toContain('Current relationship evidence is COMPLETE');
   });
 
-  it('rejects interactive state attached to a slide element reference', async () => {
+  it.each(['Legacy', 'Native'] as const)(
+    'keeps a slide reference independent of current activity state for %s Child',
+    async (mode) => {
+      if (mode === 'Native') process.env[nativeFlag] = 'true';
+      installAgentShell('Mock mixed-scene answer.', 'Mock mixed-scene answer.');
+      const activity = runtimeBody();
+      const slide = makeBody();
+      const body = {
+        ...activity,
+        storeState: {
+          ...activity.storeState,
+          scenes: [...slide.storeState.scenes, ...activity.storeState.scenes],
+        },
+        elementReference: slide.elementReference,
+      };
+      const { POST } = await import('@/app/api/chat/pi/route');
+      const response = await POST(makeRequest(body));
+      const stream = await response.text();
+      expect(response.status).toBe(200);
+      expect(response.headers.get('X-OpenMAIC-Element-Reference-Accepted')).toBe('1');
+      expect(stream).toContain('Mock mixed-scene answer.');
+      const child = (mode === 'Native' ? mocks.nativeChildPrompts : mocks.legacyChildPrompts).join(
+        '\n',
+      );
+      for (const prompt of [mocks.directorPrompts.join('\n'), child]) {
+        expect(prompt).toContain('Evaporation removes heat.');
+        expect(prompt).toContain('"value":1400');
+        expect(prompt).toContain('come from different Scenes');
+        expect(prompt).toContain('not properties of the referenced slide element');
+        expect(prompt).not.toContain('No component is referenced this turn');
+        expect(prompt).not.toContain('stale-sample');
+        expect(prompt).toContain('grants no Spotlight or other tool permissions');
+      }
+      expect(child).toContain('"elementId":"text-1"');
+    },
+  );
+
+  it('rejects a nonexistent slide reference even with valid current activity state', async () => {
     const body = runtimeBody() as Record<string, unknown>;
     body.elementReference = { kind: 'slide_element', sceneId: 'scene-1', elementId: 'element-1' };
     const { POST } = await import('@/app/api/chat/pi/route');
@@ -769,13 +806,14 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
     }
   });
 
-  it.each(['dynamic-selector', 'wrong-source', 'wrong-scope'] as const)(
+  it.each(['dynamic-selector', 'wrong-source', 'wrong-scope', 'wrong-scene'] as const)(
     'rejects %s before any model call',
     async (kind) => {
       const body = runtimeBody();
       if (kind === 'dynamic-selector') body.elementReference.selector = '#runtime-canvas-object';
       if (kind === 'wrong-source') body.interactiveState.sourceHtmlHash = '0'.repeat(64);
       if (kind === 'wrong-scope') body.interactiveState.snapshot.identity.scopeId = 'density';
+      if (kind === 'wrong-scene') body.interactiveState.snapshot.identity.sceneId = 'scene-other';
       const { POST } = await import('@/app/api/chat/pi/route');
       expect((await POST(makeRequest(body))).status).toBe(400);
       expect(mocks.resolveModel).not.toHaveBeenCalled();

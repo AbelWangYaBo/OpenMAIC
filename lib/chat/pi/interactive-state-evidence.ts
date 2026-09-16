@@ -35,6 +35,8 @@ const NOTE_FRAME_BUDGET = 8_000;
  * is declared here instead of being inherited from it. Stating it as the static
  * bound plus the frame is also what makes the degradation terminate: a degraded
  * note never exceeds the frame, so static + frame always fits.
+ * Existing slide evidence has different limits and is preserved even when it
+ * alone exceeds this Interactive budget; in that case only the state degrades.
  */
 const COMBINED_EVIDENCE_LIMIT = INTERACTIVE_PACKET_LIMIT + NOTE_FRAME_BUDGET;
 
@@ -123,11 +125,6 @@ export function attachInteractiveState(
 ): AttachedRequestEvidence {
   const raw = body.interactiveState;
   const referenced = isInteractiveReference(resolved) ? resolved : undefined;
-  // A packet may accompany an Interactive reference or stand alone, never a slide reference.
-  if (raw !== undefined && resolved !== undefined && referenced === undefined)
-    throw new ElementReferenceValidationError(
-      'Interactive state cannot accompany a slide element reference',
-    );
   // The courseware-reference feature owns this evidence channel. While it is
   // disabled an ordinary question must not gain state constraints, not even for
   // a Scene that declares the interface but can never be sampled.
@@ -156,7 +153,7 @@ export function attachInteractiveState(
     const sceneId = body.storeState.currentSceneId;
     const scene = body.storeState.scenes.find((s) => s.id === sceneId);
     const html = scene?.content.type === 'interactive' ? scene.content.html : undefined;
-    // The packet describes the declared activity area of the referenced Scene. It is
+    // The packet describes the declared activity area of the current Scene. It is
     // bound to that Scene and to the exact request-start source, never to the picked
     // component: a component reference and an area sample are separate identities.
     if (
@@ -216,10 +213,14 @@ export function attachInteractiveState(
           )}, while any page-reported facts below describe the whole declared activity area ${JSON.stringify(
             OBSERVATION_SCOPE_ID,
           )}. Area facts are not properties of that component unless an object in the state says so, and this packet does not report whether the component sits inside that area. If a fact cannot be attributed to the referenced component, say which part of the activity it describes instead of guessing.`
-        : `No component is referenced this turn. Any page-reported facts below describe the whole declared activity area ${JSON.stringify(
-            OBSERVATION_SCOPE_ID,
-          )} and identify no particular component. Do not treat them as a selection, and do not carry a reference over from an earlier turn.`,
-      ...(referenced && referenced.reference.sceneId !== body.storeState.currentSceneId
+        : resolved
+          ? `The student referenced a slide element. Any page-reported facts below describe the whole declared activity area ${JSON.stringify(
+              OBSERVATION_SCOPE_ID,
+            )} of the current Scene, not properties of the referenced slide element. The sample does not select any component in that activity.`
+          : `No component is referenced this turn. Any page-reported facts below describe the whole declared activity area ${JSON.stringify(
+              OBSERVATION_SCOPE_ID,
+            )} and identify no particular component. Do not treat them as a selection, and do not carry a reference over from an earlier turn.`,
+      ...(resolved && resolved.reference.sceneId !== body.storeState.currentSceneId
         ? [
             'The referenced component and the page-reported facts below come from different Scenes: the component was referenced on another Scene, while the state was sampled from the Scene the student is on now. Do not report the state below as a property of that component, and do not assume the component is present on the current Scene.',
           ]
@@ -252,9 +253,9 @@ export function attachInteractiveState(
   // COMPLETE while the body it describes is gone.
   const overBudget = (text: string): boolean => codePointLength(text) > COMBINED_EVIDENCE_LIMIT;
   const exceedsBudget = (candidate: string): boolean =>
-    referenced
-      ? overBudget(referenced.childEvidence + '\n\n' + candidate) ||
-        overBudget(referenced.directorSummary + '\n' + candidate)
+    resolved
+      ? overBudget(resolved.childEvidence + '\n\n' + candidate) ||
+        overBudget(resolved.directorSummary + '\n' + candidate)
       : overBudget(candidate);
   if (exceedsBudget(note))
     note = buildNote(RELATIONS_UNAVAILABLE, { status: 'unavailable', reason: 'too-large' });
@@ -268,6 +269,7 @@ export function attachInteractiveState(
       },
       stateNote: undefined,
     };
-  // No reference this turn: the area sample travels on its own.
+  // Without an Interactive reference, keep the area sample separate from any
+  // existing slide reference. The Director joins the two without changing identity.
   return { elementReference: resolved, stateNote: note };
 }
