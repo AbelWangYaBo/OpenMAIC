@@ -94,3 +94,23 @@ it('keeps font context on relative-width wrappers without duplicating relative s
   expect(box.firstChild!.marks.map((mark) => mark.type.name)).toEqual(['strong']);
   expect(createTextDocument(serializeTextDocument(doc)).eq(doc)).toBe(true);
 });
+
+// Sub/sup supply an implicit smaller font size, even without a fontsize mark.
+it.each(['sup', 'sub'])('keeps %s sizing outside relative-width containers', (tag) => {
+  for (const container of containers) {
+    const html = `<p><${tag}><strong>${container.replace('100px', '10em')}</strong></${tag}>X</p>`;
+    const doc = createTextDocument(html);
+    const box = doc.firstChild!.firstChild!;
+    const scriptMark = tag === 'sup' ? 'superscript' : 'subscript';
+    expect(box.marks.map((mark) => mark.type.name)).toEqual([scriptMark]);
+    expect(box.firstChild!.marks.map((mark) => mark.type.name)).toEqual(['strong']);
+    expect(createTextDocument(serializeTextDocument(doc)).eq(doc)).toBe(true);
+
+    const host = document.createElement('div');
+    host.innerHTML = html;
+    const raw = DOMParser.fromSchema(textSchema).parseSlice(host);
+    const plugin = buildPlugins(textSchema).find((plugin) => plugin.props.transformPasted)!;
+    const pasted = plugin.props.transformPasted!.call(plugin, raw, {} as never, false);
+    expect(pasted.content.firstChild!.firstChild!.eq(box)).toBe(true);
+  }
+});

@@ -2,8 +2,9 @@ import { Fragment, type Mark, type Node } from 'prosemirror-model';
 
 /** Semantic formatting belongs to editable contents, not their fixed-width wrapper.
  * Otherwise selecting text inside the wrapper cannot remove inherited marks.
- * Font family/size stay on wrappers: em/ex/ch dimensions and relative child
- * font sizes depend on that inherited typography context.
+ * Font family/size and sub/sup stay on wrappers: em/ex/ch dimensions and relative child
+ * font sizes depend on that inherited typography context. Sub/sup also supply
+ * an implicit smaller font size and position the whole box on the baseline.
  * Inner marks override outer marks of the same type, just as in the source HTML.
  */
 export function normalizeInlineContainerMarks(node: Node, inherited: readonly Mark[] = []): Node {
@@ -12,7 +13,11 @@ export function normalizeInlineContainerMarks(node: Node, inherited: readonly Ma
   const container = node.type.name === 'inline_text_box' || node.type.name === 'pptx_tab_column';
   if (node.isLeaf) return node.mark(marks);
   const fontContext = marks.filter(
-    (mark) => mark.type.name === 'fontname' || mark.type.name === 'fontsize',
+    (mark) =>
+      mark.type.name === 'fontname' ||
+      mark.type.name === 'fontsize' ||
+      mark.type.name === 'subscript' ||
+      mark.type.name === 'superscript',
   );
   const editableMarks = marks.filter((mark) => !fontContext.includes(mark));
   const children: Node[] = [];
