@@ -1824,7 +1824,9 @@ function runStylesToCssString(
   }
 
   const decorations: string[] = [];
-  if (runStyle.underline) decorations.push('underline');
+  // Hyperlinks are underlined by default in PPTX. Emit that explicitly: host
+  // CSS resets may remove the browser's anchor decoration. Preserve u=none.
+  if (runStyle.underline ?? !!runStyle.hlinkClick) decorations.push('underline');
   if (runStyle.strikethrough) decorations.push('line-through');
   if (decorations.length > 0) {
     parts.push(`text-decoration: ${decorations.join(' ')}`);
