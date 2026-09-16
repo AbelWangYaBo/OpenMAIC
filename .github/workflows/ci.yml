@@ -261,12 +261,17 @@ jobs:
           ln -s "$GITHUB_WORKSPACE/render-service/node_modules" .producer-source/node_modules
           cd .producer-source
           ../render-service/node_modules/.bin/vitest run --config ../render-service/producer-patch/vitest.config.mjs \
+            packages/engine/src/utils/temporaryCleanup.test.ts \
             packages/producer/src/resources/admission.test.ts \
             packages/producer/src/resources/linux.test.ts \
             packages/producer/src/resources/supervisor.test.ts \
             packages/producer/src/resources/installed-linux-evidence.test.ts \
             packages/producer/src/services/render/artifactTransaction.test.ts \
             packages/producer/src/services/render/renderExecutionContext.test.ts
+          ../render-service/node_modules/.bin/vitest run --config ../render-service/producer-patch/vitest.config.mjs \
+            packages/engine/src/services/browserManager.test.ts \
+            packages/engine/src/utils/urlDownloader.test.ts \
+            -t "keeps supervised profiles|keeps one visible inode"
 
       - name: Build container image
         run: docker build --tag openmaic-render-service:ci render-service

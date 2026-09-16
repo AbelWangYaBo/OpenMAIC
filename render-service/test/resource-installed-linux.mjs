@@ -189,6 +189,7 @@ export function checkInputs(settingsPath, name, evidencePath) {
   assert(Number.isSafeInteger(settings.owner.workerUid) && settings.owner.workerUid > 0);
   assert(Number.isSafeInteger(settings.owner.workerGid) && settings.owner.workerGid > 0);
   assert.equal(settings.owner.cleanupTimeoutMs, 10000);
+  assert.equal(settings.owner.taskPidsMax, 256);
   for (const budget of [settings.owner, settings.task]) {
     assert.equal(budget.cpuMillis, 1000);
     assert.equal(budget.memoryBytes, 805306368);
@@ -200,6 +201,7 @@ export function checkInputs(settingsPath, name, evidencePath) {
   assert.equal(read(join(delegation, 'cgroup.procs')), '');
   assert.match(read(join(delegation, 'cgroup.controllers')), /\bcpu\b/);
   assert.match(read(join(delegation, 'cgroup.controllers')), /\bmemory\b/);
+  assert.match(read(join(delegation, 'cgroup.controllers')), /\bpids\b/);
   const ownDirectory = cgroupDirectory(read('/proc/self/cgroup'));
   assert(ownDirectory !== delegation && !ownDirectory.startsWith(delegation + '/'));
   // Read actual enclosing limits, not only the cgroup mount root.
@@ -526,6 +528,7 @@ export async function runServiceCase(settingsPath, name, evidencePath) {
       assert(gate, 'Live renderer and encoder required immediately before injection');
       assert.equal(read(join(domain, 'cpu.max')), '100000 100000');
       assert.equal(read(join(domain, 'memory.max')), '805306368');
+      assert.equal(read(join(domain, 'pids.max')), String(settings.owner.taskPidsMax));
       report.injection = {
         gate,
         guardian,
@@ -533,6 +536,7 @@ export async function runServiceCase(settingsPath, name, evidencePath) {
         atMonotonicMs: Number(process.hrtime.bigint()) / 1e6,
         cpuMax: read(join(domain, 'cpu.max')),
         memoryMax: read(join(domain, 'memory.max')),
+        pidsMax: read(join(domain, 'pids.max')),
       };
       persist();
       let queued;

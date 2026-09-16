@@ -21,8 +21,10 @@ The execution owner supplies outer resource limits, bounded process cleanup and
 evidence return. Disable external networking before runtime cases while retaining
 loopback HTTP. Tests do not provision machines or implement platform recovery.
 Keep the original test budgets: 1 CPU / 768 MiB / swap 0, 10 s cleanup,
-120 s normal task deadline and 15 s injected deadline. The native fixture retains
-its own existing limits.
+120 s normal task deadline and 15 s injected deadline. The candidate adds a
+256-process/thread per-attempt limit; retain separate control-domain PID headroom.
+The native fixture adds a dedicated 32-PID exhaustion case and retains its
+existing CPU, memory and time limits.
 
 ## Build and installation identity
 
@@ -55,9 +57,23 @@ node /opt/openmaic-resource/verification/installed-linux-cases.mjs run pipeline
 ```
 
 Native cases verify launch ownership, aggregate limits, cancellation, deadline
-and lifeline loss. Pipeline cases verify real media execution, failure accounting,
+and lifeline loss. The bounded `pids-limit` case exhausts a 32-PID task domain,
+requires kernel EAGAIN plus a pids event, then requires G to drain it and finish
+cleanup after the task drains (G stays outside A; the cleanup child enters A).
+Pipeline cases verify real media execution, failure accounting,
 ancestor-pressure closure versus task-OOM recovery, reservation reuse,
-publication and quarantine. Do not inherit results from older fixture runs.
+publication and quarantine. `real-unknown-reference-normal` puts an external
+hard link on a private file inside the actual `work-*` directory and resumes the
+media tree without cancellation. Require normal worker exit, reference rejection,
+reservation retention, closed admission and the previous artifact unchanged.
+Do not inherit results from older fixture runs.
+
+The cross-review cleanup/PID revision has **NOT_RUN** installed Linux evidence.
+Portable filesystem/owner regressions do not establish kernel enforcement or
+new package qualification. Historical results remain evidence only for their
+original source/package hashes. In addition to these new cases, the review's
+native deletion-failure and concurrent A-reference/B-completion evidence remain
+open; neither is implied by the portable rename-failure regression.
 
 ## OpenMAIC installed service
 

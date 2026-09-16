@@ -7,7 +7,8 @@
     "memoryBytes": 805306368,
     "workerUid": 1001,
     "workerGid": 1001,
-    "cleanupTimeoutMs": 10000
+    "cleanupTimeoutMs": 10000,
+    "taskPidsMax": 256
   },
   "task": {
     "cpuMillis": 1000,

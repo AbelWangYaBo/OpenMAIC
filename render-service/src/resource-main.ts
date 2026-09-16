@@ -32,13 +32,18 @@ if (
   typeof owner.workerGid !== 'number' ||
   !Number.isSafeInteger(owner.workerGid) ||
   owner.workerGid <= 0 ||
+  !('taskPidsMax' in owner) ||
+  typeof owner.taskPidsMax !== 'number' ||
+  !Number.isSafeInteger(owner.taskPidsMax) ||
+  owner.taskPidsMax <= 0 ||
+  owner.taskPidsMax > 2_147_483_647 ||
   !('cleanupTimeoutMs' in owner) ||
   typeof owner.cleanupTimeoutMs !== 'number' ||
   !Number.isSafeInteger(owner.cleanupTimeoutMs) ||
   owner.cleanupTimeoutMs <= 0 ||
   owner.cleanupTimeoutMs > 60_000
 )
-  throw new Error('Invalid worker identity or cleanup bound');
+  throw new Error('Invalid worker identity, task PID limit or cleanup bound');
 if (lstatSync(config.tmpDir).uid !== owner.workerUid)
   throw new Error('Project root must already belong to the unprivileged service user');
 const settingsStat = lstatSync(settingsPath);

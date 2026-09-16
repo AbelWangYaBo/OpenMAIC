@@ -1,5 +1,5 @@
 diff --git a/.fallowrc.jsonc b/.fallowrc.jsonc
-index bb5010e28..e26d8f900 100644
+index bb5010e..e26d8f9 100644
 --- a/.fallowrc.jsonc
 +++ b/.fallowrc.jsonc
 @@ -40,6 +40,8 @@
@@ -11,11 +11,493 @@ index bb5010e28..e26d8f900 100644
      // Test fixture worker, spawned by path via the pools' workerEntryPath
      // option from the crash-recovery tests; has no import-graph referrer.
      "packages/producer/src/services/__fixtures__/crashOnMessageWorker.mjs",
+diff --git a/packages/engine/package-subpaths.json b/packages/engine/package-subpaths.json
+index 285d44f..7ff9b08 100644
+--- a/packages/engine/package-subpaths.json
++++ b/packages/engine/package-subpaths.json
+@@ -24,6 +24,12 @@
+       "runtime": "./package.json",
+       "types": null,
+       "environments": ["browser", "bun", "node"]
++    },
++    "./temporary-cleanup": {
++      "source": "./src/utils/temporaryCleanup.ts",
++      "runtime": "./dist/utils/temporaryCleanup.js",
++      "types": "./dist/utils/temporaryCleanup.d.ts",
++      "environments": ["bun", "node"]
+     }
+   }
+ }
+diff --git a/packages/engine/package.json b/packages/engine/package.json
+index 9524238..170e3b0 100644
+--- a/packages/engine/package.json
++++ b/packages/engine/package.json
+@@ -30,7 +30,12 @@
+       "import": "./src/utils/shaderTransitions.ts",
+       "types": "./src/utils/shaderTransitions.ts"
+     },
+-    "./package.json": "./package.json"
++    "./package.json": "./package.json",
++    "./temporary-cleanup": {
++      "bun": "./src/utils/temporaryCleanup.ts",
++      "import": "./src/utils/temporaryCleanup.ts",
++      "types": "./src/utils/temporaryCleanup.ts"
++    }
+   },
+   "publishConfig": {
+     "access": "public",
+@@ -47,7 +52,11 @@
+         "import": "./dist/utils/shaderTransitions.js",
+         "types": "./dist/utils/shaderTransitions.d.ts"
+       },
+-      "./package.json": "./package.json"
++      "./package.json": "./package.json",
++      "./temporary-cleanup": {
++        "import": "./dist/utils/temporaryCleanup.js",
++        "types": "./dist/utils/temporaryCleanup.d.ts"
++      }
+     },
+     "main": "./dist/index.js",
+     "types": "./dist/index.d.ts"
+diff --git a/packages/engine/src/services/audioFxRender.ts b/packages/engine/src/services/audioFxRender.ts
+index 8c977d4..d9032ec 100644
+--- a/packages/engine/src/services/audioFxRender.ts
++++ b/packages/engine/src/services/audioFxRender.ts
+@@ -1,3 +1,4 @@
++import { removeRenderTemporaryPath as rmSync } from "../utils/temporaryCleanup.js";
+ /**
+  * Applies an audio FX chain to a WAV at render time.
+  *
+@@ -12,7 +13,7 @@
+  * same way, so preview would quietly stop predicting the render.
+  */
+ 
+-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
++import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { pathToFileURL } from "node:url";
+diff --git a/packages/engine/src/services/audioMixer.ts b/packages/engine/src/services/audioMixer.ts
+index 2c2b8c6..ad3be3b 100644
+--- a/packages/engine/src/services/audioMixer.ts
++++ b/packages/engine/src/services/audioMixer.ts
+@@ -1,3 +1,4 @@
++import { removeRenderTemporaryPath as rmSync } from "../utils/temporaryCleanup.js";
+ // fallow-ignore-file complexity code-duplication
+ /**
+  * Audio Mixer Service
+@@ -5,7 +6,7 @@
+  * Processes and mixes audio tracks using FFmpeg.
+  */
+ 
+-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from "fs";
++import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, writeFileSync } from "fs";
+ import { join, dirname } from "path";
+ import { parseHTML } from "linkedom";
+ import { extractAudioMetadata } from "../utils/ffprobe.js";
+diff --git a/packages/engine/src/services/audioVolumeEnvelope.ts b/packages/engine/src/services/audioVolumeEnvelope.ts
+index 5fc8330..3baea93 100644
+--- a/packages/engine/src/services/audioVolumeEnvelope.ts
++++ b/packages/engine/src/services/audioVolumeEnvelope.ts
+@@ -1,3 +1,5 @@
++import { replaceRenderTemporaryFile as renameSync } from "../utils/temporaryCleanup.js";
++import { removeRenderTemporaryPath as rmSync } from "../utils/temporaryCleanup.js";
+ /**
+  * Sample-accurate volume automation.
+  *
+@@ -15,7 +17,7 @@
+  * the caller can fall back to the expression path rather than corrupting audio.
+  */
+ 
+-import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
++import { mkdtempSync, readFileSync, writeFileSync } from "fs";
+ import { dirname, join } from "path";
+ import type { AudioVolumeKeyframe } from "./audioMixer.types.js";
+ import { normaliseEnvelope } from "@hyperframes/core/media-volume-envelope";
+diff --git a/packages/engine/src/services/browserManager.test.ts b/packages/engine/src/services/browserManager.test.ts
+index c312921..09b4bcc 100644
+--- a/packages/engine/src/services/browserManager.test.ts
++++ b/packages/engine/src/services/browserManager.test.ts
+@@ -1,7 +1,7 @@
+ // fallow-ignore-file code-duplication
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ import { execFileSync } from "node:child_process";
+-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
++import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ 
+@@ -695,6 +695,24 @@ describe("browser pool", () => {
+     _setPuppeteerForTests(undefined);
+   });
+ 
++  it("keeps supervised profiles owned by G across browser close", async () => {
++    const root = mkdtempSync(join(tmpdir(), "guardian-profile-"));
++    vi.stubEnv("TMPDIR", root);
++    vi.stubEnv("HYPERFRAMES_RESOURCE_GUARDIAN_CLEANUP", "1");
++    try {
++      const browser = await acquireBrowser([], { enableBrowserPool: false, forceScreenshot: true });
++      const profile = launchFn.mock.calls[0]?.[0]?.userDataDir;
++      expect(typeof profile).toBe("string");
++      expect(profile.startsWith(join(root, "browser-"))).toBe(true);
++      writeFileSync(join(profile, "owned"), "keep for guardian");
++      await browser.release();
++      expect(readFileSync(join(profile, "owned"), "utf8")).toBe("keep for guardian");
++    } finally {
++      vi.unstubAllEnvs();
++      rmSync(root, { recursive: true, force: true });
++    }
++  });
++
+   it("sequential acquires with pool enabled return the same browser", async () => {
+     const first = await acquireBrowser(["--no-sandbox"], poolCfg);
+     const second = await acquireBrowser(["--no-sandbox"], poolCfg);
+diff --git a/packages/engine/src/services/browserManager.ts b/packages/engine/src/services/browserManager.ts
+index d77ad0d..6fce221 100644
+--- a/packages/engine/src/services/browserManager.ts
++++ b/packages/engine/src/services/browserManager.ts
+@@ -1,3 +1,4 @@
++import { guardianOwnsTemporaryCleanup } from "../utils/temporaryCleanup.js";
+ /**
+  * Browser Manager
+  *
+@@ -7,9 +8,9 @@
+ 
+ import type { Browser, PuppeteerNode } from "puppeteer-core";
+ import { execSync } from "child_process";
+-import { existsSync, readdirSync } from "fs";
++import { existsSync, readdirSync, mkdtempSync } from "fs";
+ import { join } from "path";
+-import { homedir } from "os";
++import { homedir, tmpdir } from "os";
+ import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
+ import { getSystemTotalMb, LOW_MEMORY_TOTAL_MB_THRESHOLD } from "./systemMemory.js";
+ import {
+@@ -72,6 +73,9 @@ async function probeHardwareWebGlInfo(
+   let probeBrowser: Browser | undefined;
+   try {
+     probeBrowser = await ppt.launch({
++      ...(guardianOwnsTemporaryCleanup()
++        ? { userDataDir: mkdtempSync(join(tmpdir(), "browser-")) }
++        : {}),
+       headless: true,
+       args: options.args,
+       defaultViewport: { width: 64, height: 64 },
+@@ -695,6 +699,9 @@ async function launchBrowser(
+   let browser: Browser | undefined;
+   try {
+     browser = await ppt.launch({
++      ...(guardianOwnsTemporaryCleanup()
++        ? { userDataDir: mkdtempSync(join(tmpdir(), "browser-")) }
++        : {}),
+       headless: true,
+       args: [...fingerprint.args],
+       defaultViewport: null,
+@@ -726,6 +733,9 @@ async function launchBrowser(
+         );
+         captureMode = "screenshot";
+         browser = await ppt.launch({
++          ...(guardianOwnsTemporaryCleanup()
++            ? { userDataDir: mkdtempSync(join(tmpdir(), "browser-")) }
++            : {}),
+           headless: true,
+           args: stripBeginFrameFlags([...fingerprint.args]),
+           defaultViewport: null,
+diff --git a/packages/engine/src/services/extractionCache.ts b/packages/engine/src/services/extractionCache.ts
+index fac2406..0ceac8f 100644
+--- a/packages/engine/src/services/extractionCache.ts
++++ b/packages/engine/src/services/extractionCache.ts
+@@ -1,3 +1,4 @@
++import { removeRenderTemporaryPath as rmSync } from "../utils/temporaryCleanup.js";
+ /**
+  * Content-Addressed Extraction Cache
+  *
+@@ -39,7 +40,6 @@ import {
+   mkdirSync,
+   readdirSync,
+   renameSync,
+-  rmSync,
+   statSync,
+   utimesSync,
+   writeFileSync,
+diff --git a/packages/engine/src/services/videoFrameExtractor.ts b/packages/engine/src/services/videoFrameExtractor.ts
+index f6e9da8..f673deb 100644
+--- a/packages/engine/src/services/videoFrameExtractor.ts
++++ b/packages/engine/src/services/videoFrameExtractor.ts
+@@ -1,3 +1,7 @@
++import {
++  removeRenderTemporaryPath as rmSync,
++  linkOrCopyRenderTemporaryFile,
++} from "../utils/temporaryCleanup.js";
+ // fallow-ignore-file unused-class-member code-duplication complexity
+ /**
+  * Video Frame Extractor Service
+@@ -6,7 +10,7 @@
+  * Videos are replaced with <img> elements during capture.
+  */
+ 
+-import { copyFileSync, existsSync, linkSync, mkdirSync, rmSync } from "fs";
++import { existsSync, mkdirSync } from "fs";
+ import { isAbsolute, join, posix, resolve, sep } from "path";
+ import { parseHTML } from "linkedom";
+ import {
+@@ -1300,11 +1304,7 @@ function frameFileName(frameNumber: number, format: CacheFrameFormat): string {
+ }
+ 
+ function linkOrCopyFrame(src: string, dest: string): void {
+-  try {
+-    linkSync(src, dest);
+-  } catch {
+-    copyFileSync(src, dest);
+-  }
++  linkOrCopyRenderTemporaryFile(src, dest);
+ }
+ 
+ function supersetGroupingKey(work: PreparedExtraction, fps: number): string {
+diff --git a/packages/engine/src/utils/temporaryCleanup.test.ts b/packages/engine/src/utils/temporaryCleanup.test.ts
+new file mode 100644
+index 0000000..6906054
+--- /dev/null
++++ b/packages/engine/src/utils/temporaryCleanup.test.ts
+@@ -0,0 +1,97 @@
++import { afterEach, describe, expect, it, vi } from "vitest";
++import {
++  existsSync,
++  linkSync,
++  lstatSync,
++  mkdtempSync,
++  readFileSync,
++  readdirSync,
++  rmSync,
++  symlinkSync,
++  writeFileSync,
++} from "node:fs";
++import { join } from "node:path";
++import { tmpdir } from "node:os";
++import {
++  removeRenderTemporaryPath,
++  replaceRenderTemporaryFile,
++  linkOrCopyRenderTemporaryFile,
++} from "./temporaryCleanup.js";
++
++const roots: string[] = [];
++function setup() {
++  const root = mkdtempSync(join(tmpdir(), "render-cleanup-"));
++  roots.push(root);
++  vi.stubEnv("HYPERFRAMES_RESOURCE_GUARDIAN_CLEANUP", "1");
++  return root;
++}
++afterEach(() => {
++  vi.unstubAllEnvs();
++  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
++});
++describe("guardian-owned temporary entries", () => {
++  it("copies supervised frames without creating internal hard-link ambiguity", () => {
++    const root = setup(),
++      source = join(root, "source"),
++      destination = join(root, "destination");
++    writeFileSync(source, "frame");
++    linkOrCopyRenderTemporaryFile(source, destination);
++    expect(readFileSync(destination, "utf8")).toBe("frame");
++    expect(lstatSync(source).ino).not.toBe(lstatSync(destination).ino);
++    expect(lstatSync(source).nlink).toBe(1);
++    expect(lstatSync(destination).nlink).toBe(1);
++    vi.stubEnv("HYPERFRAMES_RESOURCE_GUARDIAN_CLEANUP", undefined);
++    const ordinary = join(root, "ordinary");
++    linkOrCopyRenderTemporaryFile(source, ordinary);
++    expect(lstatSync(source).ino).toBe(lstatSync(ordinary).ino);
++  });
++
++  it("retains a file's inode and unknown hard link while freeing the original path for retries", () => {
++    const root = setup(),
++      file = join(root, "input"),
++      external = join(root, "external");
++    writeFileSync(file, "old");
++    linkSync(file, external);
++    removeRenderTemporaryPath(file, { force: true });
++    expect(existsSync(file)).toBe(false);
++    const name = readdirSync(root).find((name) => name.startsWith("input.retained-"));
++    expect(name).toBeDefined();
++    expect(lstatSync(join(root, name!)).ino).toBe(lstatSync(external).ino);
++    expect(lstatSync(external).nlink).toBe(2);
++    writeFileSync(file, "new");
++    expect(readFileSync(external, "utf8")).toBe("old");
++  });
++  it("preserves the previous inode across an atomic replacement", () => {
++    const root = setup(),
++      file = join(root, "input"),
++      source = join(root, "replacement"),
++      external = join(root, "external");
++    writeFileSync(file, "old");
++    linkSync(file, external);
++    writeFileSync(source, "new");
++    replaceRenderTemporaryFile(source, file);
++    expect(readFileSync(file, "utf8")).toBe("new");
++    expect(readFileSync(external, "utf8")).toBe("old");
++    expect(lstatSync(external).nlink).toBe(2);
++    const name = readdirSync(root).find((name) => name.startsWith("input.retained-"));
++    expect(lstatSync(join(root, name!)).ino).toBe(lstatSync(external).ino);
++  });
++  it("retains dangling symlinks without following their target", () => {
++    const root = setup(),
++      path = join(root, "dangling");
++    symlinkSync(join(root, "missing"), path);
++    removeRenderTemporaryPath(path, { force: true });
++    const name = readdirSync(root)[0]!;
++    expect(name).toMatch(/^dangling.retained-/);
++    expect(lstatSync(join(root, name)).isSymbolicLink()).toBe(true);
++    removeRenderTemporaryPath(path, { force: true });
++  });
++  it("leaves ordinary rendering deletion unchanged", () => {
++    const root = setup(),
++      file = join(root, "input");
++    vi.stubEnv("HYPERFRAMES_RESOURCE_GUARDIAN_CLEANUP", undefined);
++    writeFileSync(file, "old");
++    removeRenderTemporaryPath(file, { force: true });
++    expect(readdirSync(root)).toEqual([]);
++  });
++});
+diff --git a/packages/engine/src/utils/temporaryCleanup.ts b/packages/engine/src/utils/temporaryCleanup.ts
+new file mode 100644
+index 0000000..d1d7e3c
+--- /dev/null
++++ b/packages/engine/src/utils/temporaryCleanup.ts
+@@ -0,0 +1,62 @@
++import { lstatSync, linkSync, copyFileSync, renameSync, rmSync, type RmOptions } from "node:fs";
++import { randomUUID } from "node:crypto";
++
++/** W alone enables this before importing renderer code; S and ordinary renders
++ * retain their existing deletion semantics. G is the sole final unlink owner.
++ */
++export function guardianOwnsTemporaryCleanup(): boolean {
++  return process.env.HYPERFRAMES_RESOURCE_GUARDIAN_CLEANUP === "1";
++}
++
++/** Leave inode entries reachable for the post-drain guardian reference check.
++ * Rename within the same parent so retries can reuse the original pathname.
++ * Failure must never fall back to unlinking: the original entry stays visible.
++ */
++export function removeRenderTemporaryPath(
++  path: string,
++  options?: RmOptions,
++  retain = guardianOwnsTemporaryCleanup(),
++): void {
++  if (!retain) {
++    rmSync(path, options);
++    return;
++  }
++  try {
++    lstatSync(path);
++  } catch (error) {
++    if (options?.force && error instanceof Error && "code" in error && error.code === "ENOENT")
++      return;
++    throw error;
++  }
++  renameSync(path, `${path}.retained-${randomUUID()}`);
++}
++
++/** Atomic replacement also unlinks the previous inode. Keep a private link
++ * before replacing it so G can check that inode after W exits. If replacement
++ * fails, retaining an extra link is conservative: it cannot hide a reference.
++ */
++export function replaceRenderTemporaryFile(source: string, destination: string): void {
++  if (guardianOwnsTemporaryCleanup()) {
++    try {
++      linkSync(destination, `${destination}.retained-${randomUUID()}`);
++    } catch (error) {
++      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
++    }
++  }
++  renameSync(source, destination);
++}
++
++/** Supervised copies have distinct inodes, so G does not have to guess whether
++ * a multiply-linked frame is an internal cache alias or an unknown reference.
++ */
++export function linkOrCopyRenderTemporaryFile(source: string, destination: string): void {
++  if (!guardianOwnsTemporaryCleanup()) {
++    try {
++      linkSync(source, destination);
++      return;
++    } catch {
++      /* Existing copy fallback. */
++    }
++  }
++  copyFileSync(source, destination);
++}
+diff --git a/packages/engine/src/utils/urlDownloader.test.ts b/packages/engine/src/utils/urlDownloader.test.ts
+index 8aecb89..5239889 100644
+--- a/packages/engine/src/utils/urlDownloader.test.ts
++++ b/packages/engine/src/utils/urlDownloader.test.ts
+@@ -8,6 +8,7 @@ import {
+   readdirSync,
+   rmSync,
+   symlinkSync,
++  statSync,
+   utimesSync,
+   writeFileSync,
+ } from "node:fs";
+@@ -365,6 +366,19 @@ describe("downloadToTemp atomic publication and bounded retry", () => {
+     expect(fetchMock).toHaveBeenCalledTimes(1);
+   });
+ 
++  it("keeps one visible inode after supervised download publication", async () => {
++    const dir = makeTempDir();
++    vi.stubEnv("HYPERFRAMES_RESOURCE_GUARDIAN_CLEANUP", "1");
++    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("complete")));
++    try {
++      const path = await downloadToTemp("https://cdn.example/owned.mp4", dir, 1_000);
++      expect(readFileSync(path, "utf8")).toBe("complete");
++      expect(statSync(path).nlink).toBe(1);
++    } finally {
++      vi.unstubAllEnvs();
++    }
++  });
++
+   it("retries one HTTP 503 and publishes only the complete final file", async () => {
+     const fetchMock = vi
+       .fn()
+diff --git a/packages/engine/src/utils/urlDownloader.ts b/packages/engine/src/utils/urlDownloader.ts
+index 874db94..c8534aa 100644
+--- a/packages/engine/src/utils/urlDownloader.ts
++++ b/packages/engine/src/utils/urlDownloader.ts
+@@ -1,3 +1,4 @@
++import { removeRenderTemporaryPath as rmSync } from "./temporaryCleanup.js";
+ import {
+   closeSync,
+   createReadStream,
+@@ -5,16 +6,15 @@ import {
+   existsSync,
+   fsyncSync,
+   linkSync,
++  unlinkSync,
+   mkdtempSync,
+   mkdirSync,
+   lstatSync,
+   openSync,
+   readdirSync,
+   rmdirSync,
+-  rmSync,
+   statSync,
+   type Stats,
+-  unlinkSync,
+ } from "fs";
+ import { createHash, randomUUID } from "crypto";
+ import { BlockList, isIP } from "node:net";
+@@ -959,6 +959,8 @@ function syncAndPublishPartial(
+   // replace a path that another successful caller has already returned.
+   try {
+     linkSync(partialPath, localPath);
++    // The just-created no-clobber cache entry now holds this same inode in
++    // the task-owned tree. Retiring only the partial link cannot hide it from G.
+     unlinkSync(partialPath);
+     return "published";
+   } catch (error) {
 diff --git a/packages/producer/README.md b/packages/producer/README.md
-index 7349071df..491b2d210 100644
+index 7349071..b9340e2 100644
 --- a/packages/producer/README.md
 +++ b/packages/producer/README.md
-@@ -32,6 +32,123 @@ const result = await executeRenderJob(job, (progress) => {
+@@ -32,6 +32,124 @@ const result = await executeRenderJob(job, (progress) => {
  console.log(result.outputPath); // ./output.mp4
  ```
  
@@ -60,6 +542,7 @@ index 7349071df..491b2d210 100644
 +  workerUid: 65534,
 +  workerGid: 65534,
 +  cleanupTimeoutMs: 10_000,
++  taskPidsMax: 256, // Required per-attempt process/thread ceiling; S/G stay outside.
 +});
 +try {
 +  const result = await producer.render(
@@ -140,10 +623,24 @@ index 7349071df..491b2d210 100644
  
  The producer can also run as a render server, accepting render requests over HTTP:
 diff --git a/packages/producer/build.mjs b/packages/producer/build.mjs
-index 222ccc9ef..07623bc3c 100644
+index 222ccc9..4180562 100644
 --- a/packages/producer/build.mjs
 +++ b/packages/producer/build.mjs
-@@ -71,8 +71,22 @@ await Promise.all([
+@@ -31,7 +31,12 @@ const __dirname = __cjsDirname(__filename);`,
+ };
+ 
+ const workspaceAliases = {
+-  ...sourceAliases(resolve(scriptDir, "../engine"), [".", "./alpha-blit", "./shader-transitions"]),
++  ...sourceAliases(resolve(scriptDir, "../engine"), [
++    ".",
++    "./alpha-blit",
++    "./shader-transitions",
++    "./temporary-cleanup",
++  ]),
+   ...sourceAliases(resolve(scriptDir, "../core"), [".", "./lint"]),
+ };
+ 
+@@ -71,8 +76,22 @@ await Promise.all([
      outfile: "dist/services/healthWorkerThread.js",
    }),
    build({ ...sharedOpts, entryPoints: ["src/distributed.ts"], outfile: "dist/distributed.js" }),
@@ -168,7 +665,7 @@ index 222ccc9ef..07623bc3c 100644
  const coreDistDir = resolve(scriptDir, "../core/dist");
 diff --git a/packages/producer/native/build.mjs b/packages/producer/native/build.mjs
 new file mode 100644
-index 000000000..8f49b7b50
+index 0000000..8f49b7b
 --- /dev/null
 +++ b/packages/producer/native/build.mjs
 @@ -0,0 +1,52 @@
@@ -226,7 +723,7 @@ index 000000000..8f49b7b50
 +if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) buildNative();
 diff --git a/packages/producer/native/resource-launcher.c b/packages/producer/native/resource-launcher.c
 new file mode 100644
-index 000000000..59c3757d6
+index 0000000..cf67a9f
 --- /dev/null
 +++ b/packages/producer/native/resource-launcher.c
 @@ -0,0 +1,336 @@
@@ -324,7 +821,7 @@ index 000000000..59c3757d6
 +  if (strncmp(cgroup, prefix, strlen(prefix))) { errno = EINVAL; fail("cgroup location"); }
 +  char ancestor[PATH_MAX];
 +  if (snprintf(ancestor, sizeof(ancestor), "%s", cgroup + strlen(prefix)) >= (int)sizeof(ancestor)) fail("cgroup location length");
-+  const char *names[] = { "cgroup.procs", "cgroup.subtree_control", "cgroup.kill", "cpu.max", "memory.max" };
++  const char *names[] = { "cgroup.procs", "cgroup.subtree_control", "cgroup.kill", "cpu.max", "memory.max", "pids.max" };
 +  for (;;) {
 +    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
 +      char path[PATH_MAX];
@@ -568,7 +1065,7 @@ index 000000000..59c3757d6
 +}
 diff --git a/packages/producer/native/resource-supervisor.c b/packages/producer/native/resource-supervisor.c
 new file mode 100644
-index 000000000..dad24a4ae
+index 0000000..dad24a4
 --- /dev/null
 +++ b/packages/producer/native/resource-supervisor.c
 @@ -0,0 +1,109 @@
@@ -682,7 +1179,7 @@ index 000000000..dad24a4ae
 +  return exports;
 +}
 diff --git a/packages/producer/package-subpaths.json b/packages/producer/package-subpaths.json
-index 0bf942ee6..49cfbe063 100644
+index 0bf942e..49cfbe0 100644
 --- a/packages/producer/package-subpaths.json
 +++ b/packages/producer/package-subpaths.json
 @@ -1,6 +1,12 @@
@@ -699,7 +1196,7 @@ index 0bf942ee6..49cfbe063 100644
        "source": "./src/index.ts",
        "runtime": "./dist/index.js",
 diff --git a/packages/producer/package.json b/packages/producer/package.json
-index 68792f7c4..00c404f01 100644
+index 68792f7..00c404f 100644
 --- a/packages/producer/package.json
 +++ b/packages/producer/package.json
 @@ -8,12 +8,19 @@
@@ -735,7 +1232,7 @@ index 68792f7c4..00c404f01 100644
          "import": "./dist/index.js",
          "types": "./dist/index.d.ts"
 diff --git a/packages/producer/scripts/test-classification.mjs b/packages/producer/scripts/test-classification.mjs
-index 2b559f9c7..847b75ff0 100644
+index 2b559f9..847b75f 100644
 --- a/packages/producer/scripts/test-classification.mjs
 +++ b/packages/producer/scripts/test-classification.mjs
 @@ -9,6 +9,8 @@ export const PRODUCER_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), ".
@@ -749,10 +1246,10 @@ index 2b559f9c7..847b75ff0 100644
    "src/services/deterministicFonts-systemCapture.test.ts",
 diff --git a/packages/producer/src/resourceWorker.ts b/packages/producer/src/resourceWorker.ts
 new file mode 100644
-index 000000000..11946e24b
+index 0000000..5ae5d2f
 --- /dev/null
 +++ b/packages/producer/src/resourceWorker.ts
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,91 @@
 +import { readFileSync } from "node:fs";
 +import { tmpdir } from "node:os";
 +import { join } from "node:path";
@@ -760,6 +1257,7 @@ index 000000000..11946e24b
 +
 +// This entry is exec'd by the native launcher only after CLONE_INTO_CGROUP.
 +// Heavy renderer imports, request validation and disposal all belong to W.
++process.env.HYPERFRAMES_RESOURCE_GUARDIAN_CLEANUP = "1";
 +const cancel = new AbortController();
 +let cleanupFailed = false;
 +process.once("SIGTERM", () => cancel.abort(new Error("render_cancelled")));
@@ -845,7 +1343,7 @@ index 000000000..11946e24b
 +}
 diff --git a/packages/producer/src/resources.ts b/packages/producer/src/resources.ts
 new file mode 100644
-index 000000000..412bd3bf3
+index 0000000..412bd3b
 --- /dev/null
 +++ b/packages/producer/src/resources.ts
 @@ -0,0 +1,8 @@
@@ -859,7 +1357,7 @@ index 000000000..412bd3bf3
 +export type { TaskBudget } from "./resources/admission.js";
 diff --git a/packages/producer/src/resources/admission.test.ts b/packages/producer/src/resources/admission.test.ts
 new file mode 100644
-index 000000000..5bcc2cd12
+index 0000000..5bcc2cd
 --- /dev/null
 +++ b/packages/producer/src/resources/admission.test.ts
 @@ -0,0 +1,87 @@
@@ -952,7 +1450,7 @@ index 000000000..5bcc2cd12
 +});
 diff --git a/packages/producer/src/resources/admission.ts b/packages/producer/src/resources/admission.ts
 new file mode 100644
-index 000000000..5e53f1cdd
+index 0000000..5e53f1c
 --- /dev/null
 +++ b/packages/producer/src/resources/admission.ts
 @@ -0,0 +1,148 @@
@@ -1106,10 +1604,10 @@ index 000000000..5e53f1cdd
 +}
 diff --git a/packages/producer/src/resources/installed-linux-cases.mjs b/packages/producer/src/resources/installed-linux-cases.mjs
 new file mode 100644
-index 000000000..e6bd801f1
+index 0000000..e00f932
 --- /dev/null
 +++ b/packages/producer/src/resources/installed-linux-cases.mjs
-@@ -0,0 +1,1082 @@
+@@ -0,0 +1,1158 @@
 +// fallow-ignore-file complexity
 +// Concrete fault cases deliberately keep injection, observation and terminal assertions together.
 +// Concrete installed-package tests, shared by Vitest and the existing guest executor.
@@ -1165,6 +1663,7 @@ index 000000000..e6bd801f1
 +  child.on("message", (message) => {
 +    if (message.event === "native-ready") evidence.first = message.first;
 +    if (message.event === "descendants") evidence.descendants = message.pids;
++    if (message.event === "pids-limit") evidence.pidsLimit = message;
 +    persist(evidence);
 +  });
 +  child.once("error", (error) => {
@@ -1309,7 +1808,7 @@ index 000000000..e6bd801f1
 +  first.temp = { path: tempPath, realPath: tempRoot, child: tempChild };
 +  assert.throws(() => fs.openSync("/sys/fs/cgroup/cgroup.procs", "w"));
 +  process.send({ event: "native-ready", first });
-+  process.on("message", (message) => {
++  process.on("message", async (message) => {
 +    if (message.event === "finish") {
 +      process.disconnect();
 +      process.exitCode = 0;
@@ -1317,6 +1816,23 @@ index 000000000..e6bd801f1
 +      return;
 +    }
 +    if (message.event !== "load") return;
++    if (request.load === "pids") {
++      const created = [];
++      for (let i = 0; i < 300; i++) {
++        const child = spawn("/bin/sleep", ["60"], { stdio: "ignore" });
++        const error = await new Promise((resolve) => {
++          child.once("spawn", () => resolve(null));
++          child.once("error", resolve);
++        });
++        if (error) {
++          process.send({ event: "pids-limit", code: error.code, pids: created });
++          return;
++        }
++        created.push(child.pid);
++      }
++      process.send({ event: "pids-limit", code: "NO_LIMIT", pids: created });
++      return;
++    }
 +    const children = [0, 1].map(() =>
 +      spawn(process.execPath, [self, "burn", request.load], { detached: true, stdio: "ignore" }),
 +    );
@@ -1423,6 +1939,7 @@ index 000000000..e6bd801f1
 +    workerUid: 65534,
 +    workerGid: 65534,
 +    cleanupTimeoutMs: 10000,
++    taskPidsMax: 256,
 +  };
 +  const session = join(delegation, "hyperframes-session");
 +  const tasks = () =>
@@ -1456,7 +1973,14 @@ index 000000000..e6bd801f1
 +      const nativeCases =
 +        stage === "native-smoke"
 +          ? ["normal-exit"]
-+          : ["before-go", "cpu-cancel-detached", "memory-oom", "deadline", "lifeline-loss"];
++          : [
++              "before-go",
++              "cpu-cancel-detached",
++              "memory-oom",
++              "deadline",
++              "lifeline-loss",
++              "pids-limit",
++            ];
 +      for (const kind of nativeCases) {
 +        await test(kind, async (row) => {
 +          const domain = join(delegation, kind);
@@ -1466,6 +1990,7 @@ index 000000000..e6bd801f1
 +            "memory.max": String(192 * 1024 * 1024),
 +            "memory.swap.max": "0",
 +            "memory.oom.group": "1",
++            "pids.max": kind === "pids-limit" ? "32" : "256",
 +          }))
 +            fs.writeFileSync(join(domain, name), value);
 +          const work = fs.mkdtempSync(join(workRoot, "native-"));
@@ -1473,7 +1998,9 @@ index 000000000..e6bd801f1
 +          fs.chownSync(work, 65534, 65534);
 +          fs.mkdirSync(join(work, "scratch"), { mode: 0o700 });
 +          fs.chownSync(join(work, "scratch"), 65534, 65534);
-+          write(join(work, "request.json"), { load: kind === "memory-oom" ? "memory" : "cpu" });
++          write(join(work, "request.json"), {
++            load: kind === "pids-limit" ? "pids" : kind === "memory-oom" ? "memory" : "cpu",
++          });
 +          // Launcher argv accepts an entry file, not additional Node arguments.
 +          const entry = join(workRoot, `native-worker-${kind}.mjs`);
 +          fs.writeFileSync(
@@ -1530,7 +2057,21 @@ index 000000000..e6bd801f1
 +              observation.evidence.hostFirst = status(first.pid);
 +              save();
 +              if (kind === "normal-exit") launcher.send({ event: "finish" });
-+              else if (kind !== "deadline") {
++              else if (kind === "pids-limit") {
++                launcher.send({ event: "load" });
++                await observation.waitReady(() => observation.evidence.pidsLimit);
++                const rejected = observation.evidence.pidsLimit;
++                assert.equal(rejected.code, "EAGAIN");
++                descendants = rejected.pids;
++                assert(descendants.length > 0);
++                assert.equal(read(join(domain, "pids.max")), "32");
++                assert(Number(read(join(domain, "pids.current"))) <= 32);
++                assert(statValue(read(join(domain, "pids.events")), "max") > 0);
++                observation.evidence.pidsEvents = read(join(domain, "pids.events"));
++                observation.evidence.guardianAtLimit = status(launcher.pid);
++                assert(observation.evidence.guardianAtLimit);
++                launcher.stdin.write("C");
++              } else if (kind !== "deadline") {
 +                launcher.send({ event: "load" });
 +                await observation.waitReady(() => observation.evidence.descendants.length === 2);
 +                descendants = observation.evidence.descendants;
@@ -1912,6 +2453,7 @@ index 000000000..e6bd801f1
 +          "guardian-death",
 +          "supervisor-death",
 +          "unknown-reference",
++          "unknown-reference-normal",
 +          "ancestor-pressure",
 +        ]) {
 +          await test(`real-${kind}`, async (row) => {
@@ -2000,15 +2542,25 @@ index 000000000..e6bd801f1
 +              save();
 +              assert.match(read(join(domain, "cpu.max")), /^100000 100000$/);
 +              assert.equal(read(join(domain, "memory.max")), String(budget.memoryBytes));
++              assert.equal(read(join(domain, "pids.max")), String(options.taskPidsMax));
 +              fault.previousOutputSha256 = previousHash;
 +              fault.reservationAtInjection = producer ? producer.status() : null;
 +              save();
-+              if (kind === "unknown-reference") {
++              if (kind === "unknown-reference" || kind === "unknown-reference-normal") {
 +                const reserved = fs
 +                  .readdirSync(work)
 +                  .find((name) => fs.statSync(join(work, name)).isDirectory());
 +                assert(reserved);
-+                const source = join(work, reserved, "scratch", "retained");
++                let directory = join(work, reserved, "scratch");
++                if (kind === "unknown-reference-normal") {
++                  const taskWork = fs
++                    .readdirSync(join(work, reserved), { withFileTypes: true })
++                    .find((entry) => entry.isDirectory() && entry.name.startsWith("work-"));
++                  assert(taskWork, "Actual pipeline work directory required");
++                  directory = join(work, reserved, taskWork.name);
++                }
++                const source = join(directory, "retained");
++                fault.referenceSource = source;
 +                fs.writeFileSync(source, "reference");
 +                fs.linkSync(source, join(work, "retained-link"));
 +              }
@@ -2054,10 +2606,17 @@ index 000000000..e6bd801f1
 +                save();
 +              } else if (kind === "guardian-death") process.kill(guardian, "SIGKILL");
 +              else if (kind === "supervisor-death") child.kill("SIGKILL");
-+              else if (kind !== "deadline") cancel.abort(new Error(kind));
++              else if (kind === "unknown-reference-normal") {
++                // No cancellation: let the real normal disposer run before G.
++                for (const proc of observed)
++                  if (status(proc.pid)) process.kill(proc.pid, "SIGCONT");
++                fault.allowedNormalCompletion = true;
++              } else if (kind !== "deadline") cancel.abort(new Error(kind));
 +              const terminal = await Promise.race([
 +                done,
-+                delay(25000, undefined, { ref: false }).then(() => {
++                delay(kind === "unknown-reference-normal" ? timeoutMs + 10000 : 25000, undefined, {
++                  ref: false,
++                }).then(() => {
 +                  throw new Error("Product cleanup deadline");
 +                }),
 +              ]);
@@ -2095,7 +2654,11 @@ index 000000000..e6bd801f1
 +                // Platform test owner may remove the empty, unreusable dead-S session.
 +                fs.rmdirSync(domain);
 +                fs.rmdirSync(session);
-+              } else if (kind === "guardian-death" || kind === "unknown-reference") {
++              } else if (
++                kind === "guardian-death" ||
++                kind === "unknown-reference" ||
++                kind === "unknown-reference-normal"
++              ) {
 +                assert.match(failure, /cleanup could not be verified|quarantined/);
 +                assert.equal(producer.status().quarantined, 1);
 +                assert.equal(producer.status().memoryBytes, budget.memoryBytes);
@@ -2104,6 +2667,17 @@ index 000000000..e6bd801f1
 +                  producer.render(request, budget, { timeoutMs: 1000 }),
 +                  /closed|quarantined/,
 +                );
++                if (kind === "unknown-reference-normal") {
++                  assert(fault.allowedNormalCompletion);
++                  assert(
++                    !exists(fault.referenceSource),
++                    "Normal disposer must have retired the original entry",
++                  );
++                  assert.equal(fs.statSync(join(work, "retained-link")).nlink, 2);
++                  assert.match(failure, /worker=0/);
++                  assert.match(failure, /unknown retained file reference/);
++                  fault.normalWorkerExitVerified = true;
++                }
 +                fault.admissionRejectedWhileQuarantined = true;
 +                await assert.rejects(producer.close(), /quarantined/);
 +                assert.throws(() => createBudgetedProducer(options), /existing owner/);
@@ -2194,7 +2768,7 @@ index 000000000..e6bd801f1
 +}
 diff --git a/packages/producer/src/resources/installed-linux-evidence.test.ts b/packages/producer/src/resources/installed-linux-evidence.test.ts
 new file mode 100644
-index 000000000..f50ad0521
+index 0000000..f50ad05
 --- /dev/null
 +++ b/packages/producer/src/resources/installed-linux-evidence.test.ts
 @@ -0,0 +1,69 @@
@@ -2269,7 +2843,7 @@ index 000000000..f50ad0521
 +});
 diff --git a/packages/producer/src/resources/installed-linux.test.ts b/packages/producer/src/resources/installed-linux.test.ts
 new file mode 100644
-index 000000000..3b960839c
+index 0000000..3b96083
 --- /dev/null
 +++ b/packages/producer/src/resources/installed-linux.test.ts
 @@ -0,0 +1,25 @@
@@ -2300,12 +2874,15 @@ index 000000000..3b960839c
 +});
 diff --git a/packages/producer/src/resources/linux.test.ts b/packages/producer/src/resources/linux.test.ts
 new file mode 100644
-index 000000000..cf5eb8d4c
+index 0000000..89f3856
 --- /dev/null
 +++ b/packages/producer/src/resources/linux.test.ts
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,56 @@
 +import { describe, expect, it } from "vitest";
-+import { memoryPressure, type AncestorMemory } from "./linux.js";
++import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { setBudget, requireControllers, memoryPressure, type AncestorMemory } from "./linux.js";
 +
 +const snapshot = (events = "high 0\nmax 0\noom 0\noom_kill 0"): AncestorMemory[] => [
 +  {
@@ -2339,12 +2916,30 @@ index 000000000..cf5eb8d4c
 +    expect(memoryPressure(rows, rows).triggers[0]?.event).toBe("at-memory.high");
 +  });
 +});
++
++it("requires pids delegation and records a finite task limit before launch", () => {
++  const root = mkdtempSync(join(tmpdir(), "task-controls-"));
++  try {
++    writeFileSync(join(root, "cgroup.controllers"), "cpu memory");
++    expect(() => requireControllers(root)).toThrow("pids");
++    writeFileSync(join(root, "cgroup.controllers"), "cpu memory pids");
++    requireControllers(root);
++    setBudget(root, { cpuMillis: 1000, memoryBytes: 805306368 }, 256);
++    expect(readFileSync(join(root, "pids.max"), "utf8")).toBe("256");
++    for (const invalid of [0, -1, 1.5, Infinity, 2147483648])
++      expect(() => setBudget(root, { cpuMillis: 1000, memoryBytes: 805306368 }, invalid)).toThrow(
++        "taskPidsMax",
++      );
++  } finally {
++    rmSync(root, { recursive: true, force: true });
++  }
++});
 diff --git a/packages/producer/src/resources/linux.ts b/packages/producer/src/resources/linux.ts
 new file mode 100644
-index 000000000..c2470b42e
+index 0000000..a3cb3e1
 --- /dev/null
 +++ b/packages/producer/src/resources/linux.ts
-@@ -0,0 +1,295 @@
+@@ -0,0 +1,317 @@
 +import { createRequire } from "node:module";
 +import {
 +  accessSync,
@@ -2385,6 +2980,8 @@ index 000000000..c2470b42e
 +  memoryEvents: string;
 +  memoryEventsLocal: string;
 +  cpuStat: string;
++  pidsCurrent: string;
++  pidsEvents: string;
 +}
 +
 +export interface AncestorMemory {
@@ -2464,11 +3061,27 @@ index 000000000..c2470b42e
 +  return match[1] === "1";
 +}
 +
-+function setBudget(root: string, budget: TaskBudget): void {
++export function setBudget(root: string, budget: TaskBudget, pidsMax?: number): void {
++  if (
++    pidsMax !== undefined &&
++    (!Number.isSafeInteger(pidsMax) || pidsMax < 1 || pidsMax > 2_147_483_647)
++  )
++    throw new Error("Invalid taskPidsMax");
++
 +  writeVerified(root, "cpu.max", `${budget.cpuMillis * 100} 100000`);
 +  writeVerified(root, "memory.max", String(budget.memoryBytes));
 +  writeVerified(root, "memory.swap.max", "0");
 +  writeVerified(root, "memory.oom.group", "1");
++  if (pidsMax !== undefined) {
++    writeVerified(root, "pids.max", String(pidsMax));
++  }
++}
++
++export function requireControllers(root: string): void {
++  const available = read(join(root, "cgroup.controllers")).split(/\s+/);
++  for (const controller of ["cpu", "memory", "pids"])
++    if (!available.includes(controller))
++      throw new Error(`Missing delegated ${controller} controller`);
 +}
 +
 +/** Owns only a fresh session under the caller's delegated, empty task root. */
@@ -2481,7 +3094,11 @@ index 000000000..c2470b42e
 +
 +  // Fail-closed permission and capability checks precede the one owned session.
 +  // fallow-ignore-next-line complexity
-+  constructor(taskRoot: string, envelope: TaskBudget) {
++  constructor(
++    taskRoot: string,
++    envelope: TaskBudget,
++    private readonly taskPidsMax: number,
++  ) {
 +    if ("bun" in process.versions || Number(process.versions.node.split(".")[0]) < 22) {
 +      throw new Error("Supervised Producer requires Node.js 22 or newer");
 +    }
@@ -2508,11 +3125,9 @@ index 000000000..c2470b42e
 +    if (ownMembership === taskMembership || ownMembership.startsWith(`${taskMembership}/`)) {
 +      throw new Error("Supervisor must be outside the task budget root");
 +    }
-+    for (const controller of ["cpu", "memory"]) {
-+      if (!read(join(taskRoot, "cgroup.controllers")).split(/\s+/).includes(controller)) {
-+        throw new Error(`Missing delegated ${controller} controller`);
-+      }
-+    }
++    requireControllers(taskRoot);
++    if (!Number.isSafeInteger(taskPidsMax) || taskPidsMax < 1 || taskPidsMax > 2_147_483_647)
++      throw new Error("Invalid taskPidsMax");
 +    const files = runtimeFiles();
 +    for (const path of [process.execPath, files.worker]) {
 +      const canonical = realpathSync(path);
@@ -2541,9 +3156,9 @@ index 000000000..c2470b42e
 +    this.root = join(taskRoot, "hyperframes-session");
 +    mkdirSync(this.root, { mode: 0o700 });
 +    try {
-+      writeFileSync(join(taskRoot, "cgroup.subtree_control"), "+cpu +memory");
++      writeFileSync(join(taskRoot, "cgroup.subtree_control"), "+cpu +memory +pids");
 +      setBudget(this.root, envelope);
-+      writeFileSync(join(this.root, "cgroup.subtree_control"), "+cpu +memory");
++      writeFileSync(join(this.root, "cgroup.subtree_control"), "+cpu +memory +pids");
 +      for (let path = this.root; path !== "/sys/fs/cgroup"; path = dirname(path)) {
 +        if (this.ancestorPaths.length >= 64) throw new Error("Too many visible cgroup ancestors");
 +        this.ancestorPaths.push(path);
@@ -2563,7 +3178,7 @@ index 000000000..c2470b42e
 +    // Management files stay root-owned and no delegation is given to W.
 +    mkdirSync(root, { mode: 0o755 });
 +    try {
-+      setBudget(root, budget);
++      setBudget(root, budget, this.taskPidsMax);
 +    } catch (error) {
 +      rmdirSync(root);
 +      throw error;
@@ -2620,6 +3235,8 @@ index 000000000..c2470b42e
 +      memoryEvents: read(join(root, "memory.events")),
 +      memoryEventsLocal: read(join(root, "memory.events.local")),
 +      cpuStat: read(join(root, "cpu.stat")),
++      pidsCurrent: read(join(root, "pids.current")),
++      pidsEvents: read(join(root, "pids.events")),
 +    };
 +  }
 +
@@ -2642,10 +3259,10 @@ index 000000000..c2470b42e
 +}
 diff --git a/packages/producer/src/resources/supervisor.test.ts b/packages/producer/src/resources/supervisor.test.ts
 new file mode 100644
-index 000000000..832f3f077
+index 0000000..3552381
 --- /dev/null
 +++ b/packages/producer/src/resources/supervisor.test.ts
-@@ -0,0 +1,394 @@
+@@ -0,0 +1,399 @@
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import { EventEmitter } from "node:events";
 +import { PassThrough } from "node:stream";
@@ -2756,6 +3373,8 @@ index 000000000..832f3f077
 +    memoryEvents: "oom 0",
 +    memoryEventsLocal: "oom 0",
 +    cpuStat: "usage_usec 1234",
++    pidsCurrent: "0",
++    pidsEvents: "max 2",
 +  });
 +  boundary.accounting.mockImplementation(() => boundary.remove.getMockImplementation()?.());
 +  boundary.spawn.mockImplementation((_file: string, args: string[]) => {
@@ -2835,6 +3454,7 @@ index 000000000..832f3f077
 +    workerUid: 65534,
 +    workerGid: 65534,
 +    cleanupTimeoutMs: 100,
++    taskPidsMax: 256,
 +  });
 +  return { producer, request, budget, output, dir };
 +}
@@ -2879,6 +3499,8 @@ index 000000000..832f3f077
 +          memoryEvents: "oom 0",
 +          memoryEventsLocal: "oom 0",
 +          cpuStat: "usage_usec 1234",
++          pidsCurrent: "0",
++          pidsEvents: "max 2",
 +        },
 +      },
 +    });
@@ -3042,10 +3664,10 @@ index 000000000..832f3f077
 +});
 diff --git a/packages/producer/src/resources/supervisor.ts b/packages/producer/src/resources/supervisor.ts
 new file mode 100644
-index 000000000..05d86ba7e
+index 0000000..e959637
 --- /dev/null
 +++ b/packages/producer/src/resources/supervisor.ts
-@@ -0,0 +1,501 @@
+@@ -0,0 +1,503 @@
 +import { spawn } from "node:child_process";
 +import {
 +  chownSync,
@@ -3077,6 +3699,8 @@ index 000000000..05d86ba7e
 +  workerUid: number;
 +  workerGid: number;
 +  cleanupTimeoutMs: number;
++  /** Per-attempt process/thread ceiling; not a second admission ledger. */
++  taskPidsMax: number;
 +}
 +
 +export interface BudgetedRenderResult {
@@ -3164,10 +3788,10 @@ index 000000000..05d86ba7e
 +
 +export function createBudgetedProducer(input: BudgetedProducerOptions): BudgetedProducer {
 +  const options = Object.freeze({ ...input });
-+  for (const key of ["workerUid", "workerGid", "cleanupTimeoutMs"] as const)
++  for (const key of ["workerUid", "workerGid", "cleanupTimeoutMs", "taskPidsMax"] as const)
 +    boundedInteger(options[key], key);
 +  const admission = new Admission(options);
-+  const linux = new LinuxTasks(options.taskCgroupRoot, options);
++  const linux = new LinuxTasks(options.taskCgroupRoot, options, options.taskPidsMax);
 +  const active = new Map<AbortController, Promise<unknown>>();
 +  let closePromise: Promise<void> | undefined;
 +  let pressure: PressureObservation | undefined;
@@ -3547,8 +4171,88 @@ index 000000000..05d86ba7e
 +    },
 +  };
 +}
+diff --git a/packages/producer/src/services/animatedGifPrep.ts b/packages/producer/src/services/animatedGifPrep.ts
+index e8ef90d..d0d27ee 100644
+--- a/packages/producer/src/services/animatedGifPrep.ts
++++ b/packages/producer/src/services/animatedGifPrep.ts
+@@ -1,14 +1,8 @@
++import { replaceRenderTemporaryFile as renameSync } from "@hyperframes/engine/temporary-cleanup";
++import { removeRenderTemporaryPath as rmSync } from "@hyperframes/engine/temporary-cleanup";
+ // fallow-ignore-file complexity
+ import { createHash } from "node:crypto";
+-import {
+-  copyFileSync,
+-  existsSync,
+-  mkdirSync,
+-  readFileSync,
+-  renameSync,
+-  rmSync,
+-  statSync,
+-} from "node:fs";
++import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+ import { dirname, isAbsolute, join, resolve } from "node:path";
+ import { parseHTML } from "linkedom";
+ import { parseAnimatedGifMetadata, type AnimatedGifMetadata } from "@hyperframes/core";
+diff --git a/packages/producer/src/services/audioExtractor.ts b/packages/producer/src/services/audioExtractor.ts
+index 42208f1..d2bcf0c 100644
+--- a/packages/producer/src/services/audioExtractor.ts
++++ b/packages/producer/src/services/audioExtractor.ts
+@@ -1,3 +1,4 @@
++import { removeRenderTemporaryPath as rmSync } from "@hyperframes/engine/temporary-cleanup";
+ // fallow-ignore-file unused-file code-duplication complexity
+ /**
+  * Audio Extractor Service
+@@ -7,7 +8,7 @@
+  */
+ 
+ import { spawn } from "node:child_process";
+-import { existsSync, mkdirSync, rmSync, readFileSync } from "node:fs";
++import { existsSync, mkdirSync, readFileSync } from "node:fs";
+ import { join, dirname } from "node:path";
+ import { getFfmpegBinary, trackChildProcess } from "@hyperframes/engine";
+ 
+diff --git a/packages/producer/src/services/compilationRunner.ts b/packages/producer/src/services/compilationRunner.ts
+index ad436f3..0898d0d 100644
+--- a/packages/producer/src/services/compilationRunner.ts
++++ b/packages/producer/src/services/compilationRunner.ts
+@@ -1,10 +1,11 @@
++import { removeRenderTemporaryPath as rmSync } from "@hyperframes/engine/temporary-cleanup";
+ /**
+  * Compilation Test Runner
+  *
+  * Orchestrates compilation tests: compiles input HTML, compares to golden files.
+  */
+ 
+-import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync, mkdirSync } from "fs";
++import { readFileSync, writeFileSync, existsSync, mkdtempSync, mkdirSync } from "fs";
+ import { join } from "path";
+ import { tmpdir } from "os";
+ import { compileForRender } from "./htmlCompiler.js";
+diff --git a/packages/producer/src/services/fontCompression.ts b/packages/producer/src/services/fontCompression.ts
+index ad4c5cf..b8cfec7 100644
+--- a/packages/producer/src/services/fontCompression.ts
++++ b/packages/producer/src/services/fontCompression.ts
+@@ -1,15 +1,9 @@
++import { replaceRenderTemporaryFile as renameSync } from "@hyperframes/engine/temporary-cleanup";
++import { removeRenderTemporaryPath as rmSync } from "@hyperframes/engine/temporary-cleanup";
+ // @ts-expect-error -- wawoff2 ships no type declarations; ambient .d.ts only visible to producer's own tsconfig
+ import wawoff2 from "wawoff2";
+ import { createHash } from "node:crypto";
+-import {
+-  existsSync,
+-  mkdirSync,
+-  mkdtempSync,
+-  readFileSync,
+-  renameSync,
+-  rmSync,
+-  writeFileSync,
+-} from "node:fs";
++import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+ import { homedir, tmpdir } from "node:os";
+ import { dirname, join } from "node:path";
+ 
 diff --git a/packages/producer/src/services/render/artifactTransaction.test.ts b/packages/producer/src/services/render/artifactTransaction.test.ts
-index 771138eb4..5636fa62e 100644
+index 771138e..5636fa6 100644
 --- a/packages/producer/src/services/render/artifactTransaction.test.ts
 +++ b/packages/producer/src/services/render/artifactTransaction.test.ts
 @@ -12,6 +12,7 @@ import {
@@ -3604,11 +4308,19 @@ index 771138eb4..5636fa62e 100644
      const dir = tempDir();
      const destination = join(dir, "render.mp4");
 diff --git a/packages/producer/src/services/render/artifactTransaction.ts b/packages/producer/src/services/render/artifactTransaction.ts
-index 23956a36d..b13c01ea8 100644
+index 23956a3..e022079 100644
 --- a/packages/producer/src/services/render/artifactTransaction.ts
 +++ b/packages/producer/src/services/render/artifactTransaction.ts
-@@ -10,7 +10,7 @@ import {
-   rmSync,
+@@ -1,3 +1,4 @@
++import { removeRenderTemporaryPath as rmSync } from "@hyperframes/engine/temporary-cleanup";
+ import {
+   closeSync,
+   existsSync,
+@@ -7,10 +8,9 @@ import {
+   readSync,
+   readdirSync,
+   renameSync,
+-  rmSync,
  } from "node:fs";
  import { basename, dirname, extname, join, resolve } from "node:path";
 -import { extractMediaMetadata } from "../../utils/ffprobe.js";
@@ -3648,17 +4360,49 @@ index 23956a36d..b13c01ea8 100644
      const hadDestination = this.fileSystem.existsSync(this.destinationPath);
  
      // Both files and new directories publish with one rename. In particular,
+diff --git a/packages/producer/src/services/render/audioPadTrim.ts b/packages/producer/src/services/render/audioPadTrim.ts
+index db16b01..57a74ab 100644
+--- a/packages/producer/src/services/render/audioPadTrim.ts
++++ b/packages/producer/src/services/render/audioPadTrim.ts
+@@ -1,3 +1,5 @@
++import { replaceRenderTemporaryFile as renameSync } from "@hyperframes/engine/temporary-cleanup";
++import { removeRenderTemporaryPath as rmSync } from "@hyperframes/engine/temporary-cleanup";
+ // fallow-ignore-file complexity
+ /**
+  * audioPadTrim — pad-or-trim the mixed-audio file so its exact duration
+@@ -20,7 +22,7 @@
+  */
+ 
+ import { spawn } from "node:child_process";
+-import { mkdtempSync, renameSync, rmSync } from "node:fs";
++import { mkdtempSync } from "node:fs";
+ import { dirname, join } from "node:path";
+ import {
+   extractAudioMetadata,
 diff --git a/packages/producer/src/services/render/renderExecutionContext.test.ts b/packages/producer/src/services/render/renderExecutionContext.test.ts
-index adf1810b1..4ec277b66 100644
+index adf1810..4dc3800 100644
 --- a/packages/producer/src/services/render/renderExecutionContext.test.ts
 +++ b/packages/producer/src/services/render/renderExecutionContext.test.ts
-@@ -1,3 +1,5 @@
+@@ -1,3 +1,18 @@
 +// fallow-ignore-file complexity
 +// Each ownership regression keeps its setup and terminal assertions in one test.
++import {
++  mkdtempSync,
++  mkdirSync,
++  writeFileSync,
++  linkSync,
++  readdirSync,
++  statSync,
++  readFileSync,
++  existsSync,
++  rmSync,
++} from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
  import { describe, expect, it, vi } from "vitest";
  import type { ProducerLogger } from "../../logger.js";
  import type { RenderJob } from "../renderOrchestrator.js";
-@@ -21,6 +23,43 @@ function job(): RenderJob {
+@@ -21,6 +36,43 @@ function job(): RenderJob {
  }
  
  describe("RenderExecutionContext", () => {
@@ -3702,11 +4446,88 @@ index adf1810b1..4ec277b66 100644
    it("freezes request identity and scopes every log record", () => {
      const base = logger();
      const context = new RenderExecutionContext({
+@@ -135,3 +187,71 @@ describe("RenderExecutionContext", () => {
+     await context.dispose();
+   });
+ });
++
++// Real filesystem regression for the normal-disposer ordering, without a VM.
++it("strict normal disposal preserves a linked work inode for the drained guardian", async () => {
++  const root = mkdtempSync(join(tmpdir(), "strict-disposal-"));
++  try {
++    const work = join(root, "work-task");
++    mkdirSync(work);
++    writeFileSync(join(work, "frame"), "original private bytes");
++    linkSync(join(work, "frame"), join(root, "external-link"));
++    const context = new RenderExecutionContext({
++      request: { renderJobId: "one", projectDir: root, outputPath: join(root, "out.mp4") },
++      logger: logger(),
++      requireCleanup: true,
++    });
++    context.defer("remove workDir", () => context.removeTemporaryPath(work));
++    await context.dispose();
++    expect(existsSync(work)).toBe(false);
++    const retained = readdirSync(root).find((name) => name.startsWith("work-task.retained-"));
++    expect(retained).toBeDefined();
++    const file = join(root, retained!, "frame");
++    expect(statSync(file).ino).toBe(statSync(join(root, "external-link")).ino);
++    expect(statSync(file).nlink).toBe(2);
++    expect(readFileSync(file, "utf8")).toBe("original private bytes");
++    // Retrying at the old pathname cannot overwrite the retained inode.
++    mkdirSync(work);
++    writeFileSync(join(work, "frame"), "retry");
++    expect(readFileSync(file, "utf8")).toBe("original private bytes");
++  } finally {
++    rmSync(root, { recursive: true, force: true });
++  }
++});
++it("ordinary disposal still removes its work directory", async () => {
++  const root = mkdtempSync(join(tmpdir(), "ordinary-disposal-"));
++  try {
++    const work = join(root, "work");
++    mkdirSync(work);
++    writeFileSync(join(work, "frame"), "x");
++    const context = new RenderExecutionContext({
++      request: { renderJobId: "ordinary", projectDir: root, outputPath: join(root, "out") },
++      logger: logger(),
++    });
++    context.defer("remove workDir", () => context.removeTemporaryPath(work));
++    await context.dispose();
++    expect(existsSync(work)).toBe(false);
++  } finally {
++    rmSync(root, { recursive: true, force: true });
++  }
++});
++it("a failed strict rename stays a cleanup failure rather than falling back to unlink", async () => {
++  const root = mkdtempSync(join(tmpdir(), "failed-disposal-"));
++  try {
++    const context = new RenderExecutionContext({
++      request: { renderJobId: "failed", projectDir: root, outputPath: join(root, "out") },
++      logger: logger(),
++      requireCleanup: true,
++    });
++    // A path longer than NAME_MAX still exists as a directory, but cannot be
++    // renamed to the longer retained name. This is a real filesystem error.
++    const work = join(root, "w".repeat(250));
++    mkdirSync(work);
++    writeFileSync(join(work, "file"), "keep");
++    context.defer("remove workDir", () => context.removeTemporaryPath(work));
++    await expect(context.dispose()).rejects.toThrow("Render cleanup failed");
++    expect(readFileSync(join(work, "file"), "utf8")).toBe("keep");
++  } finally {
++    rmSync(root, { recursive: true, force: true });
++  }
++});
 diff --git a/packages/producer/src/services/render/renderExecutionContext.ts b/packages/producer/src/services/render/renderExecutionContext.ts
-index eb9476196..750b0545a 100644
+index eb94761..7c167ad 100644
 --- a/packages/producer/src/services/render/renderExecutionContext.ts
 +++ b/packages/producer/src/services/render/renderExecutionContext.ts
-@@ -10,6 +10,8 @@ export interface RenderExecutionRequestIdentity {
+@@ -1,3 +1,4 @@
++import { removeRenderTemporaryPath } from "@hyperframes/engine/temporary-cleanup";
+ import type { ProducerLogger } from "../../logger.js";
+ import type { ProgressCallback } from "../renderOrchestrator.js";
+ import { OrderedRenderEventPublisher } from "./renderEventPublisher.js";
+@@ -10,6 +11,8 @@ export interface RenderExecutionRequestIdentity {
  
  export type RenderDisposer = () => Promise<void> | void;
  
@@ -3715,7 +4536,7 @@ index eb9476196..750b0545a 100644
  interface RegisteredDisposer {
    active: boolean;
    label: string;
-@@ -22,6 +24,8 @@ export interface RenderExecutionContextOptions {
+@@ -22,6 +25,8 @@ export interface RenderExecutionContextOptions {
    progressSink?: ProgressCallback;
    signal?: AbortSignal;
    deadlineAtMs?: number;
@@ -3724,7 +4545,7 @@ index eb9476196..750b0545a 100644
  }
  
  function scopedLogger(
-@@ -58,8 +62,15 @@ export class RenderExecutionContext {
+@@ -58,8 +63,15 @@ export class RenderExecutionContext {
  
    private readonly disposers: RegisteredDisposer[] = [];
    private disposePromise: Promise<void> | null = null;
@@ -3740,7 +4561,23 @@ index eb9476196..750b0545a 100644
      this.request = Object.freeze({ ...options.request });
      this.signal = composeSignal(options.signal, options.deadlineAtMs);
      this.logger = scopedLogger(options.logger, { renderJobId: options.request.renderJobId });
-@@ -83,13 +94,15 @@ export class RenderExecutionContext {
+@@ -79,17 +91,31 @@ export class RenderExecutionContext {
+     };
+   }
+ 
++  /** Keep private inodes reachable until G has drained W and can inspect them.
++   * A rename also lets retries create a fresh directory at the original path.
++   * No pre-delete nlink scan is relied upon while W may still have children.
++   */
++  removeTemporaryPath(path: string): void {
++    removeRenderTemporaryPath(
++      path,
++      { recursive: true, force: true, maxRetries: 3, retryDelay: 100 },
++      this.requireCleanup,
++    );
++  }
++
+   assertActive(createError: () => Error = () => new Error("render_cancelled")): void {
      if (this.signal?.aborted) throw createError();
    }
  
@@ -3759,7 +4596,7 @@ index eb9476196..750b0545a 100644
      await this.events.flush();
      for (const entry of this.disposers.reverse()) {
        if (!entry.active) continue;
-@@ -97,6 +110,7 @@ export class RenderExecutionContext {
+@@ -97,6 +123,7 @@ export class RenderExecutionContext {
        try {
          await entry.dispose();
        } catch (error) {
@@ -3767,7 +4604,7 @@ index eb9476196..750b0545a 100644
          try {
            this.logger.debug(`Cleanup failed (${entry.label})`, {
              error: error instanceof Error ? error.message : String(error),
-@@ -107,5 +121,12 @@ export class RenderExecutionContext {
+@@ -107,5 +134,12 @@ export class RenderExecutionContext {
          }
        }
      }
@@ -3780,11 +4617,80 @@ index eb9476196..750b0545a 100644
 +    }
    }
  }
+diff --git a/packages/producer/src/services/render/shared.ts b/packages/producer/src/services/render/shared.ts
+index 15eaf82..ee9de38 100644
+--- a/packages/producer/src/services/render/shared.ts
++++ b/packages/producer/src/services/render/shared.ts
+@@ -1,3 +1,4 @@
++import { removeRenderTemporaryPath as rmSync } from "@hyperframes/engine/temporary-cleanup";
+ /**
+  * Shared types and pure helpers used by the staged render pipeline.
+  *
+@@ -10,15 +11,7 @@
+  * backwards compatibility with existing test files and external callers.
+  */
+ 
+-import {
+-  copyFileSync,
+-  cpSync,
+-  existsSync,
+-  mkdirSync,
+-  rmSync,
+-  symlinkSync,
+-  writeFileSync,
+-} from "node:fs";
++import { copyFileSync, cpSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+ import {
+   CANVAS_DIMENSIONS,
+diff --git a/packages/producer/src/services/render/stages/captureHdrResources.ts b/packages/producer/src/services/render/stages/captureHdrResources.ts
+index 2634122..65f6e9a 100644
+--- a/packages/producer/src/services/render/stages/captureHdrResources.ts
++++ b/packages/producer/src/services/render/stages/captureHdrResources.ts
+@@ -1,3 +1,4 @@
++import { removeRenderTemporaryPath as rmSync } from "@hyperframes/engine/temporary-cleanup";
+ /**
+  * captureHdrResources — HDR resource setup helpers for the HDR layered
+  * composite stage. Extracted from `captureHdrStage.ts` so the orchestrator
+@@ -24,7 +25,6 @@ import {
+   mkdtempSync,
+   openSync,
+   readFileSync,
+-  rmSync,
+   statfsSync,
+ } from "node:fs";
+ import { join } from "node:path";
+diff --git a/packages/producer/src/services/render/stages/encodeStage.ts b/packages/producer/src/services/render/stages/encodeStage.ts
+index 892f23c..9458a10 100644
+--- a/packages/producer/src/services/render/stages/encodeStage.ts
++++ b/packages/producer/src/services/render/stages/encodeStage.ts
+@@ -1,3 +1,4 @@
++import { removeRenderTemporaryPath as rmSync } from "@hyperframes/engine/temporary-cleanup";
+ /**
+  * encodeStage — Stage 5 of `executeRenderJob`. Two paths share the stage:
+  *
+@@ -28,7 +29,7 @@
+  *     `success: false`.
+  */
+ 
+-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
++import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+ import { dirname, join } from "node:path";
+ import {
+   encodeFramesChunkedConcat,
 diff --git a/packages/producer/src/services/renderOrchestrator.ts b/packages/producer/src/services/renderOrchestrator.ts
-index 427f15299..2686abe9d 100644
+index 427f152..7b1f4b8 100644
 --- a/packages/producer/src/services/renderOrchestrator.ts
 +++ b/packages/producer/src/services/renderOrchestrator.ts
-@@ -2133,6 +2133,7 @@ export async function executeRenderJob(
+@@ -37,7 +37,6 @@ import {
+   mkdtempSync,
+   readFileSync,
+   readdirSync,
+-  rmSync,
+   statSync,
+   writeFileSync,
+   copyFileSync,
+@@ -2133,6 +2132,7 @@ export async function executeRenderJob(
    outputPath: string,
    progressSink?: ProgressCallback,
    abortSignal?: AbortSignal,
@@ -3792,7 +4698,7 @@ index 427f15299..2686abe9d 100644
  ): Promise<void> {
    const moduleDir = dirname(fileURLToPath(import.meta.url));
    const producerRoot = process.env.PRODUCER_RENDERS_DIR
-@@ -2152,6 +2153,7 @@ export async function executeRenderJob(
+@@ -2152,6 +2152,7 @@ export async function executeRenderJob(
      logger: logPath ? createRenderFileLogger(logPath, baseLog) : baseLog,
      progressSink,
      signal: abortSignal,
@@ -3800,15 +4706,19 @@ index 427f15299..2686abe9d 100644
    });
    const log = execution.logger;
    execution.defer("remove workDir", () => {
-@@ -2163,6 +2165,7 @@ export async function executeRenderJob(
-     rmSync(workDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+@@ -2160,9 +2161,10 @@ export async function executeRenderJob(
+       log.info("KEEP_TEMP=1 — leaving workDir on disk for inspection", { workDir });
+       return;
+     }
+-    rmSync(workDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
++    execution.removeTemporaryPath(workDir);
    });
  
 +  let primary: { error: unknown } | undefined;
    try {
      await executeRenderPipeline({
        job,
-@@ -2173,8 +2176,11 @@ export async function executeRenderJob(
+@@ -2173,8 +2175,11 @@ export async function executeRenderJob(
        pipelineStart,
        execution,
      });
@@ -3821,3 +4731,12 @@ index 427f15299..2686abe9d 100644
    }
  }
  
+@@ -3959,7 +3964,7 @@ async function executeRenderPipeline(input: {
+           // The failed attempt's frames are untrusted BUT satisfy the
+           // completeness check — wipe them so the retry re-captures everything
+           // instead of silently keeping damaged files.
+-          rmSync(framesDir, { recursive: true, force: true });
++          execution.removeTemporaryPath(framesDir);
+           mkdirSync(framesDir, { recursive: true });
+           resetCaptureAttemptProgress(job);
+           dedupPerfs.length = 0;
