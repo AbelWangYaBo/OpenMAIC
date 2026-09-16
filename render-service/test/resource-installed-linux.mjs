@@ -644,17 +644,19 @@ export async function runServiceCase(settingsPath, name, evidencePath) {
       // waitpid in the native orphan reaper can steal this direct child's
       // status between a /proc check and Node's SIGCHLD callback. Let Node
       // collect its child before invoking that reaper during shutdown.
-      if (child?.pid && observation)
-        await until(() => observation.evidence.exitObserved, 25000);
-      await until(() => {
-        reapOrphans();
-        return (
-          !still(api) &&
-          !still(supervisor) &&
-          [...known.values()].every((row) => !still(row)) &&
-          [...guardians.values()].every((row) => !still(row))
-        );
-      }, Math.max(0, cleanupDeadline - performance.now()));
+      if (child?.pid && observation) await until(() => observation.evidence.exitObserved, 25000);
+      await until(
+        () => {
+          reapOrphans();
+          return (
+            !still(api) &&
+            !still(supervisor) &&
+            [...known.values()].every((row) => !still(row)) &&
+            [...guardians.values()].every((row) => !still(row))
+          );
+        },
+        Math.max(0, cleanupDeadline - performance.now()),
+      );
       report.cleanup = {
         status: 'PROCESSES_EXITED',
         sessionRetained: fs.existsSync(session),
