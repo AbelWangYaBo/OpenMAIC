@@ -1150,7 +1150,10 @@ export async function transformParsedToSlides(
                 (textDiv.firstElementChild as HTMLElement | null)?.style?.padding || ''
               ).trim();
 
-              const span = textDiv.querySelector('span');
+              // Tab columns describe layout; their nested run carries the font.
+              const span = textDiv.querySelector<HTMLSpanElement>(
+                'span:not([data-pptx-tab-column="true"])',
+              );
               const fontsize = span?.style.fontSize
                 ? (parseInt(span?.style.fontSize) * ratio).toFixed(1) + 'px'
                 : '';
@@ -1230,6 +1233,25 @@ export async function transformParsedToSlides(
                   if (el.tagName === 'SPAN') {
                     const st = keepRunStyle(el);
                     const inner = serializeInline(el);
+                    if (el.dataset.pptxTabColumn === 'true') {
+                      // Preserve explicit tab boundaries, including empty columns.
+                      // Scale their point widths like the cell's font size while
+                      // continuing to discard unrelated legacy spacing spans.
+                      const columnStyle = document.createElement('span').style;
+                      for (const property of [
+                        'display',
+                        'width',
+                        'min-width',
+                        'text-indent',
+                        'text-align',
+                        'white-space',
+                      ]) {
+                        const value = el.style.getPropertyValue(property);
+                        if (value) columnStyle.setProperty(property, convertPtToPx(value, ratio));
+                      }
+                      out += `<span data-pptx-tab-column="true" style="${columnStyle.cssText}">${inner}</span>`;
+                      return;
+                    }
                     out += st ? `<span style="${st}">${inner}</span>` : inner;
                     return;
                   }

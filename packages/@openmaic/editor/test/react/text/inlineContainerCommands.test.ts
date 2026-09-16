@@ -230,3 +230,86 @@ it('does not strip script formatting in the shared paste/drop conversion hook', 
     view.destroy();
   }
 });
+
+it('copies relative font sizes as rendered sizes before inserting into another font context', () => {
+  const doc = createTextDocument(
+    '<p><span style="font-size:2em"><span style="display:inline-block;width:10em">ABCD</span></span></p>',
+  );
+  const view = new EditorView(document.createElement('div'), {
+    state: EditorState.create({
+      doc,
+      selection: TextSelection.create(doc, 3, 4),
+      plugins: buildPlugins(textSchema),
+    }),
+  });
+  document.body.append(view.dom);
+  try {
+    // jsdom has no relative-unit layout; provide the browser-resolved size on
+    // the rendered box while retaining 2em in the document being copied.
+    (view.dom.querySelector('[data-inline-text-box]') as HTMLElement).style.fontSize = '32px';
+    const copied = view.serializeForClipboard(view.state.selection.content()).dom.innerHTML;
+    expect(copied).toContain('font-size: 32px');
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 5)));
+    view.pasteHTML(copied, {} as ClipboardEvent);
+    const host = document.createElement('div');
+    host.innerHTML = serializeTextDocument(view.state.doc);
+    expect(
+      host.querySelector('[data-inline-text-box] [style*="font-size: 32px"]')?.textContent,
+    ).toBe('B');
+  } finally {
+    view.dom.remove();
+    view.destroy();
+  }
+});
+
+it('measures the selected run at a font-size boundary', () => {
+  const doc = createTextDocument(
+    '<p><span style="font-size:2em"><span style="display:inline-block;width:10em">A<span style="font-size:0.5em">BC</span>D</span></span></p>',
+  );
+  const view = new EditorView(document.createElement('div'), {
+    state: EditorState.create({
+      doc,
+      selection: TextSelection.create(doc, 3, 4),
+      plugins: buildPlugins(textSchema),
+    }),
+  });
+  document.body.append(view.dom);
+  try {
+    const box = view.dom.querySelector('[data-inline-text-box]') as HTMLElement;
+    box.style.fontSize = '32px';
+    (box.querySelector('span') as HTMLElement).style.fontSize = '16px';
+    const copied = view.serializeForClipboard(view.state.selection.content()).dom.innerHTML;
+    expect(copied).toContain('font-size: 16px');
+    expect(copied).not.toContain('font-size: 32px');
+  } finally {
+    view.dom.remove();
+    view.destroy();
+  }
+});
+
+it('compensates absolute child sizes when carrying script formatting', () => {
+  const doc = createTextDocument(
+    '<p><span style="font-size:2em"><sup><span style="display:inline-block;width:10em">A<span style="font-size:20px">BC</span>D</span></sup></span></p>',
+  );
+  const view = new EditorView(document.createElement('div'), {
+    state: EditorState.create({
+      doc,
+      selection: TextSelection.create(doc, 3, 4),
+      plugins: buildPlugins(textSchema),
+    }),
+  });
+  document.body.append(view.dom);
+  try {
+    const script = view.dom.querySelector('sup') as HTMLElement;
+    script.style.fontSize = '24px';
+    script.parentElement!.style.fontSize = '32px';
+    const copied = view.serializeForClipboard(view.state.selection.content()).dom.innerHTML;
+    expect(copied).toContain('font-size: 26.6667px');
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(doc, 5)));
+    view.pasteHTML(copied, {} as ClipboardEvent);
+    expect(serializeTextDocument(view.state.doc)).toContain('font-size: 20px');
+  } finally {
+    view.dom.remove();
+    view.destroy();
+  }
+});

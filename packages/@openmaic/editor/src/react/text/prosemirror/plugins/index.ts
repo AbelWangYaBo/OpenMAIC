@@ -41,7 +41,7 @@ export const buildPlugins = (schema: Schema, options?: PluginOptions) => {
           for (let depth = 1; depth <= $from.sharedDepth(to); depth++) {
             inherited.push(...$from.node(depth).marks);
           }
-          const adjusted = removeInheritedScriptDuplicates(slice, inherited);
+          const adjusted = removeInheritedScriptDuplicates(slice, inherited, view);
           if (adjusted.eq(slice)) return false;
           view.dispatch(
             view.state.tr

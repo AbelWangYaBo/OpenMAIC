@@ -3,6 +3,7 @@ import { EditorState, TextSelection } from 'prosemirror-state';
 import { describe, expect, it } from 'vitest';
 import { createTextDocument } from '../../../src/react/text/prosemirror/document';
 import { buildKeymap } from '../../../src/react/text/prosemirror/plugins/keymap';
+import { history, undo } from 'prosemirror-history';
 
 const boxes = {
   pptx_tab_column: (text: string) =>
@@ -48,6 +49,31 @@ for (const [type, box] of Object.entries(boxes)) {
       expect(next.selection.$from.parent.type.name).toBe(type);
       expect(next.selection.$from.parentOffset).toBe(0);
       expect(next.selection.$from.index(1)).toBe(1);
+    });
+    it('exits the list when Enter is pressed again in the new empty item', () => {
+      const first = press(selectText(`<ul><li><p>${box('ABCD')}</p></li></ul>`, 4), 'Enter');
+      expect(first.doc.firstChild!.childCount).toBe(2);
+      const next = press(first, 'Enter');
+      expect(next.doc.childCount).toBe(2);
+      expect(next.doc.firstChild!.type.name).toBe('bullet_list');
+      expect(next.doc.firstChild!.childCount).toBe(1);
+      expect(next.doc.lastChild!.type.name).toBe('paragraph');
+      expect(next.doc.lastChild!.content.size).toBe(0);
+      expect(next.selection.$from.parent).toBe(next.doc.lastChild);
+    });
+    it('outdents a new empty nested item on the next Enter', () => {
+      const first = press(
+        selectText(`<ul><li><p>Parent</p><ul><li><p>${box('ABCD')}</p></li></ul></li></ul>`, 4),
+        'Enter',
+      );
+      const next = press(first, 'Enter');
+      const outer = next.doc.firstChild!;
+      expect(outer.childCount).toBe(2);
+      expect(outer.firstChild!.lastChild!.type.name).toBe('bullet_list');
+      expect(outer.firstChild!.lastChild!.childCount).toBe(1);
+      expect(outer.lastChild!.firstChild!.content.size).toBe(0);
+      expect(next.selection.$from.node(2)).toBe(outer.lastChild);
+      expect(next.selection.$from.parent.type.name).toBe('paragraph');
     });
     it('splits safely when deleting the selection also removes its inline wrapper', () => {
       const state = selectText(`<ul><li><p>${box('ABCD')}</p><p>Next</p></li></ul>`, 0);
@@ -107,3 +133,32 @@ for (const [type, box] of Object.entries(boxes)) {
     });
   });
 }
+
+it('undo restores the empty wrapped list item in one step', () => {
+  const first = press(
+    selectText(`<ul><li><p>${boxes.pptx_tab_column('ABCD')}</p></li></ul>`, 4),
+    'Enter',
+  );
+  const state = EditorState.create({
+    doc: first.doc,
+    selection: first.selection,
+    plugins: [history()],
+  });
+  let next = press(state, 'Enter');
+  expect(undo(next, (tr) => (next = next.apply(tr)))).toBe(true);
+  expect(next.doc.eq(state.doc)).toBe(true);
+  expect(next.selection.eq(state.selection)).toBe(true);
+});
+
+it('keeps a formula-only wrapped paragraph as list content', () => {
+  const doc = createTextDocument(
+    `<ul><li><p>${boxes.pptx_tab_column('<span data-inline-math="x"></span>')}</p></li></ul>`,
+  );
+  const state = EditorState.create({ doc, selection: TextSelection.create(doc, 4) });
+  const next = press(state, 'Enter');
+  expect(next.doc.childCount).toBe(1);
+  expect(next.doc.firstChild!.childCount).toBe(2);
+  expect(next.doc.firstChild!.lastChild!.firstChild!.firstChild!.firstChild!.type.name).toBe(
+    'inline_math',
+  );
+});

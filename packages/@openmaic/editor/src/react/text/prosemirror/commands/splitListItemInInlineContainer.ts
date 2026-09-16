@@ -1,6 +1,8 @@
-import { splitBlock } from 'prosemirror-commands';
+import { chainCommands, liftEmptyBlock, splitBlock } from 'prosemirror-commands';
+import { splitListItem } from 'prosemirror-schema-list';
+import { isInlineContainer } from '../inlineContainerMarks';
 import type { NodeType } from 'prosemirror-model';
-import { EditorState, type Command } from 'prosemirror-state';
+import { EditorState, TextSelection, type Command } from 'prosemirror-state';
 
 /** Split editable inline wrappers, their paragraph, and its containing list item. */
 export const splitListItemInInlineContainer = (itemType: NodeType): Command => {
@@ -15,6 +17,33 @@ export const splitListItemInInlineContainer = (itemType: NodeType): Command => {
       $to.sharedDepth($from.pos) < paragraphDepth
     )
       return false;
+
+    // Empty inline wrappers are structural content, but should behave like an
+    // empty paragraph for Enter: exit a top-level list or outdent a nested item.
+    // Keep atoms (formulas, spacers, hard breaks) even when textContent is empty.
+    let emptyWrappers = true;
+    $from.node(paragraphDepth).descendants((node) => {
+      if (!isInlineContainer(node)) emptyWrappers = false;
+    });
+    if (state.selection.empty && emptyWrappers) {
+      const start = $from.start(paragraphDepth);
+      const tr = state.tr.delete(start, $from.end(paragraphDepth));
+      tr.setSelection(TextSelection.create(tr.doc, start));
+      const prepared = EditorState.create({ doc: tr.doc, selection: tr.selection });
+      return chainCommands(
+        splitListItem(itemType),
+        liftEmptyBlock,
+        splitBlock,
+      )(
+        prepared,
+        dispatch &&
+          ((result) => {
+            for (const step of result.steps) tr.step(step);
+            tr.setSelection(result.selection.getBookmark().resolve(tr.doc));
+            dispatch(tr.scrollIntoView());
+          }),
+      );
+    }
 
     // Delete first: a selection can remove its inline wrapper, changing the
     // depth splitBlock must split. Its input state must reflect that new depth.
