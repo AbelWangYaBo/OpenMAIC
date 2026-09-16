@@ -35,7 +35,11 @@ function clearTextFormatting(view: EditorView) {
   autoSelectAll(view);
   const { $from, $to } = view.state.selection;
   const tr = view.state.tr;
-  for (const type of Object.values(view.state.schema.marks)) materializeInlineMark(tr, type);
+  // Container font family/size are the local typography context. Clearing a
+  // text selection removes its own overrides, not that structural context.
+  for (const type of Object.values(view.state.schema.marks)) {
+    if (type.name !== 'fontname' && type.name !== 'fontsize') materializeInlineMark(tr, type);
+  }
   view.dispatch(tr.removeMark($from.pos, $to.pos));
   setListStyle(view, [
     { key: 'fontsize', value: '' },

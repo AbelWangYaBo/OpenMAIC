@@ -72,3 +72,33 @@ export function preserveOpenContainerMarks(slice: Slice): Slice {
   );
   return new Slice(Fragment.fromArray(children), slice.openStart, slice.openEnd);
 }
+
+// A partial copied box is opened into the destination container. Its text
+// already inherits that container's script position, so do not apply it twice.
+// Closed boxes retain their own independent formatting context.
+export function removeInheritedScriptDuplicates(slice: Slice, inherited: readonly Mark[]): Slice {
+  const scripts = inherited.filter((mark) => ['subscript', 'superscript'].includes(mark.type.name));
+  if (!scripts.length) return slice;
+  const map = (node: Node, start: number, end: number): Node => {
+    if (isInlineContainer(node) && start <= 0 && end <= 0) return node;
+    const children: Node[] = [];
+    node.forEach((child, _offset, index) =>
+      children.push(
+        map(child, index === 0 ? start - 1 : 0, index === node.childCount - 1 ? end - 1 : 0),
+      ),
+    );
+    const marks = node.marks.filter((mark) => !scripts.some((script) => script.eq(mark)));
+    return (node.isLeaf ? node : node.copy(Fragment.fromArray(children))).mark(marks);
+  };
+  const children: Node[] = [];
+  slice.content.forEach((node, _offset, index) =>
+    children.push(
+      map(
+        node,
+        index === 0 ? slice.openStart : 0,
+        index === slice.content.childCount - 1 ? slice.openEnd : 0,
+      ),
+    ),
+  );
+  return new Slice(Fragment.fromArray(children), slice.openStart, slice.openEnd);
+}

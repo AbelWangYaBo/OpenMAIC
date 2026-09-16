@@ -136,3 +136,97 @@ it('reports inherited toolbar formatting and clears only the selected character'
     view.destroy();
   }
 });
+
+it.each(['sup', 'sub'])('does not duplicate %s when pasting back into its source box', (tag) => {
+  const doc = createTextDocument(
+    `<p><${tag}><span style="display:inline-block;width:10em">ABCD</span></${tag}></p>`,
+  );
+  const view = new EditorView(document.createElement('div'), {
+    state: EditorState.create({
+      doc,
+      selection: TextSelection.create(doc, 3, 4),
+      plugins: buildPlugins(textSchema),
+    }),
+  });
+  try {
+    const copied = view.serializeForClipboard(view.state.selection.content()).dom.innerHTML;
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 5)));
+    view.pasteHTML(copied, {} as ClipboardEvent);
+    const host = document.createElement('div');
+    host.innerHTML = serializeTextDocument(view.state.doc);
+    expect(host.textContent).toBe('ABCBD');
+    expect(host.querySelector(`${tag} ${tag}`)).toBeNull();
+    expect(host.querySelector(tag)?.textContent).toBe('ABCBD');
+  } finally {
+    view.destroy();
+  }
+});
+
+it('preserves nested relative font contexts when clearing a sibling', () => {
+  const doc = createTextDocument(
+    '<p><span style="font-size:2em"><span style="display:inline-block;width:10em">AB<span style="font-size:0.5em"><span style="display:inline-block;width:3em">CD</span></span>EF</span></span></p>',
+  );
+  const view = new EditorView(document.createElement('div'), {
+    state: EditorState.create({
+      doc,
+      selection: TextSelection.create(doc, 2, 3),
+      plugins: buildPlugins(textSchema),
+    }),
+  });
+  try {
+    executeTextCommand(view, { command: 'clear' });
+    const outer = view.state.doc.firstChild!.firstChild!;
+    expect(outer.marks.find((mark) => mark.type.name === 'fontsize')?.attrs.fontsize).toBe('2em');
+    const inner = outer.child(1);
+    expect(inner.marks.find((mark) => mark.type.name === 'fontsize')?.attrs.fontsize).toBe('0.5em');
+    expect(inner.textContent).toBe('CD');
+  } finally {
+    view.destroy();
+  }
+});
+
+it('keeps a complete pasted box independent of the destination script context', () => {
+  const doc = createTextDocument(
+    '<p><sup><span style="display:inline-block;width:10em">ABCD</span></sup></p>',
+  );
+  const view = new EditorView(document.createElement('div'), {
+    state: EditorState.create({
+      doc,
+      selection: TextSelection.create(doc, 3),
+      plugins: buildPlugins(textSchema),
+    }),
+  });
+  try {
+    const slice = doc.slice(1, 7);
+    const plugin = buildPlugins(textSchema).find((p) => p.props.transformPasted)!;
+    expect(plugin.props.transformPasted!.call(plugin, slice, view, false).eq(slice)).toBe(true);
+    expect(plugin.props.handlePaste!.call(plugin, view, {} as ClipboardEvent, slice)).toBe(false);
+  } finally {
+    view.destroy();
+  }
+});
+
+it('does not strip script formatting in the shared paste/drop conversion hook', () => {
+  const doc = createTextDocument(
+    '<p><sup><span style="display:inline-block;width:10em">ABCD</span></sup></p>',
+  );
+  const view = new EditorView(document.createElement('div'), {
+    state: EditorState.create({
+      doc,
+      selection: TextSelection.create(doc, 3, 4),
+      plugins: buildPlugins(textSchema),
+    }),
+  });
+  try {
+    const plugin = buildPlugins(textSchema).find((p) => p.props.transformPasted)!;
+    const copied = plugin.props.transformCopied!.call(plugin, view.state.selection.content(), view);
+    const transformed = plugin.props.transformPasted!.call(plugin, copied, view, false);
+    let scripted = false;
+    transformed.content.descendants((node) => {
+      if (node.isText && textSchema.marks.superscript.isInSet(node.marks)) scripted = true;
+    });
+    expect(scripted).toBe(true);
+  } finally {
+    view.destroy();
+  }
+});
