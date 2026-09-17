@@ -22,3 +22,24 @@ it('retains legacy byte mappings when the text font itself is symbolic', () => {
     </a:rPr><a:t>Ø</a:t></a:r></a:p>`);
   expect(html).toContain('➢');
 });
+
+it.each([
+  ['legacy byte', 'Wingdings 3', '{'],
+  ['private use', 'Arial', '\uF07B'],
+])('preserves the upper-right triangle for Wingdings 3 %s characters', (_, latin, text) => {
+  const html = renderTxBodyHtml(`<a:p><a:r><a:rPr sz="2400">
+    <a:latin typeface="${latin}"/><a:sym typeface="Wingdings 3"/>
+    </a:rPr><a:t>${text}</a:t></a:r></a:p>`);
+  expect(html).toContain('◥');
+  expect(html).not.toContain('▲');
+});
+
+it.each([
+  ['Wingdings 3', '{'],
+  ['Wingdings', 'n'],
+])('preserves ordinary ASCII with supplemental %s font information', (symbol, text) => {
+  const html = renderTxBodyHtml(`<a:p><a:r><a:rPr sz="2400">
+    <a:latin typeface="Arial"/><a:sym typeface="${symbol}"/>
+    </a:rPr><a:t>${text}</a:t></a:r></a:p>`);
+  expect(html).toContain(`>${text}</span>`);
+});

@@ -97,7 +97,7 @@ const WINGDINGS2: Record<number, string> = {
 const WINGDINGS3: Record<number, string> = {
   0x7d: '▶',
   0x7e: '◀',
-  0x7b: '▲',
+  0x7b: '◥', // Upper-right right-angle triangle, also used by U+F07B.
   0x7c: '▼',
   0x75: '►',
   0x76: '◄',
