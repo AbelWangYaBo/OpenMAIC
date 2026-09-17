@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { expect, it } from 'vitest';
-import { EditorState, TextSelection } from 'prosemirror-state';
+import { AllSelection, EditorState, TextSelection } from 'prosemirror-state';
 import { executeTextCommand } from '../../../src/react/text/commandExecutor';
 import { getMarkAttrs } from '../../../src/react/text/prosemirror/utils';
 import { undo, redo } from 'prosemirror-history';
@@ -313,3 +313,38 @@ it('compensates absolute child sizes when carrying script formatting', () => {
     view.destroy();
   }
 });
+
+it.each(['caret', 'all', 'cross-container'])(
+  'preserves container font contexts when clearing a %s selection',
+  (mode) => {
+    const doc = createTextDocument(
+      '<p><span style="font-family:Arial;font-size:2em"><span style="display:inline-block;width:10em"><strong>A</strong><span style="font-family:Georgia;font-size:0.5em"><span style="display:inline-block;width:3em"><span style="font-family:Verdana;font-size:12px;color:red">BC</span></span></span>D</span></span><span style="font-size:18px">E</span></p>',
+    );
+    const selection =
+      mode === 'all'
+        ? new AllSelection(doc)
+        : TextSelection.create(doc, 2, mode === 'caret' ? 2 : doc.content.size - 1);
+    const view = new EditorView(document.createElement('div'), {
+      state: EditorState.create({ doc, selection, plugins: buildPlugins(textSchema) }),
+    });
+    try {
+      executeTextCommand(view, { command: 'clear' });
+      const outer = view.state.doc.firstChild!.firstChild!;
+      const inner = outer.child(1);
+      expect(outer.marks.find((m) => m.type.name === 'fontsize')?.attrs.fontsize).toBe('2em');
+      expect(outer.marks.find((m) => m.type.name === 'fontname')?.attrs.fontname).toBe('Arial');
+      expect(inner.marks.find((m) => m.type.name === 'fontsize')?.attrs.fontsize).toBe('0.5em');
+      expect(inner.marks.find((m) => m.type.name === 'fontname')?.attrs.fontname).toBe('Georgia');
+      expect(outer.attrs.width).toBe('10em');
+      expect(inner.attrs.width).toBe('3em');
+      view.state.doc.descendants((node) => {
+        if (node.isText) expect(node.marks).toEqual([]);
+      });
+      expect(view.state.doc.textContent).toBe('ABCDE');
+      expect(undo(view.state, view.dispatch)).toBe(true);
+      expect(view.state.doc.toJSON()).toEqual(doc.toJSON());
+    } finally {
+      view.destroy();
+    }
+  },
+);

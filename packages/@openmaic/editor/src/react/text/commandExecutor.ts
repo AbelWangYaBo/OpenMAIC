@@ -38,9 +38,28 @@ function clearTextFormatting(view: EditorView) {
   // Container font family/size are the local typography context. Clearing a
   // text selection removes its own overrides, not that structural context.
   for (const type of Object.values(view.state.schema.marks)) {
-    if (type.name !== 'fontname' && type.name !== 'fontsize') materializeInlineMark(tr, type);
+    if (type.name === 'fontname' || type.name === 'fontsize') {
+      tr.doc.nodesBetween($from.pos, $to.pos, (node, pos) => {
+        if (node.isInline && node.isLeaf) {
+          if (!type.isInSet(node.marks)) return;
+          const from = Math.max(pos, $from.pos);
+          const to = Math.min(pos + node.nodeSize, $to.pos);
+          // removeMark also visits enclosing inline nodes, including when its
+          // range starts inside them. Replace just the selected leaf so undo
+          // cannot restore a container mark onto its descendants.
+          tr.replaceWith(
+            from,
+            to,
+            node.cut(from - pos, to - pos).mark(type.removeFromSet(node.marks)),
+          );
+        }
+      });
+    } else {
+      materializeInlineMark(tr, type);
+      tr.removeMark($from.pos, $to.pos, type);
+    }
   }
-  view.dispatch(tr.removeMark($from.pos, $to.pos));
+  view.dispatch(tr);
   setListStyle(view, [
     { key: 'fontsize', value: '' },
     { key: 'color', value: '' },
