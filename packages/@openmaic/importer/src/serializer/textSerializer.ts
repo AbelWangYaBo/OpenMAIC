@@ -1795,7 +1795,7 @@ export function renderTextBody(
     const tIns = bp.numAttr('tIns') ?? cm?.tIns ?? DEFAULT_V_INSET;
     const bIns = bp.numAttr('bIns') ?? cm?.bIns ?? DEFAULT_V_INSET;
     const pt = (emu: number) => parseFloat((emu / 12700).toFixed(2));
-    html = `<div style="padding: ${pt(tIns)}pt ${pt(rIns)}pt ${pt(bIns)}pt ${pt(lIns)}pt;">${html}</div>`;
+    html = `<div data-pptx-text-insets="true" style="padding: ${pt(tIns)}pt ${pt(rIns)}pt ${pt(bIns)}pt ${pt(lIns)}pt;">${html}</div>`;
   }
 
   return html;

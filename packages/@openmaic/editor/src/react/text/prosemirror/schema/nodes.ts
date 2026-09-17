@@ -182,19 +182,25 @@ const textContainer: NodeSpec = {
   content: 'block+',
   attrs: {
     padding: { default: '' },
+    pptxTextInsets: { default: false },
   },
   parseDOM: [
     {
       tag: 'div',
       getAttrs: (dom) => {
         const padding = (dom as HTMLElement).style.padding;
-        return padding ? { padding } : false;
+        const pptxTextInsets =
+          (dom as HTMLElement).getAttribute('data-pptx-text-insets') === 'true';
+        return padding || pptxTextInsets ? { padding, pptxTextInsets } : false;
       },
     },
   ],
   toDOM: (node: Node) => [
     'div',
-    node.attrs.padding ? { style: `padding: ${node.attrs.padding};` } : {},
+    {
+      ...(node.attrs.padding ? { style: `padding: ${node.attrs.padding};` } : {}),
+      ...(node.attrs.pptxTextInsets ? { 'data-pptx-text-insets': 'true' } : {}),
+    },
     0,
   ],
 };

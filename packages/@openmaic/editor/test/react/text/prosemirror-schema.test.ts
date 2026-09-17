@@ -268,3 +268,20 @@ it('retains an editable inline box and its spacing after deleting its text', () 
   expect(restored.eq(empty)).toBe(true);
   expect(restored.firstChild!.firstChild!.type.name).toBe('inline_text_box');
 });
+
+it.each(['', 'padding:0px;', 'padding:4px 8px;'])(
+  'preserves the PPTX inset marker through editing and reopening (%s)',
+  (style) => {
+    const doc = createTextDocument(
+      `<div data-pptx-text-insets="true" style="${style}"><p>Text</p></div>`,
+    );
+    let state = EditorState.create({ doc });
+    state = state.apply(state.tr.insertText('New ', 2));
+    const saved = serializeTextDocument(state.doc);
+    expect(saved).toContain('data-pptx-text-insets="true"');
+    const reopened = createTextDocument(saved);
+    expect(reopened.eq(state.doc)).toBe(true);
+    expect(reopened.firstChild!.attrs.padding).toBe(doc.firstChild!.attrs.padding);
+    expect(reopened.textContent).toBe('New Text');
+  },
+);

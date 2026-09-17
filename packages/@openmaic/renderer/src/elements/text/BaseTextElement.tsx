@@ -17,9 +17,13 @@ export function BaseTextElement({ elementInfo, target, renderContent }: BaseText
   // Imported OOXML text carries its own bodyPr insets on the outer div.
   // Adding the editor's default inset again shifts vertical text left and
   // reduces the available line width for horizontal text.
-  const hasTextInsets = /^\s*<div\b[^>]*\bstyle\s*=\s*["'][^"']*\bpadding\s*:/i.test(
+  const hasExplicitTextInsets = /^\s*<div\b[^>]*\sdata-pptx-text-insets\s*=\s*(["'])true\1/i.test(
     elementInfo.content,
   );
+  // Legacy saved slides predate the marker. Retain their existing inset behavior.
+  const hasTextInsets =
+    hasExplicitTextInsets ||
+    /^\s*<div\b[^>]*\bstyle\s*=\s*["'][^"']*\bpadding\s*:/i.test(elementInfo.content);
 
   const vAlign = elementInfo.vAlign ?? 'top';
   const justifyContent =

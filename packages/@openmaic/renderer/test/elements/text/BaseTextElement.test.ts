@@ -121,3 +121,26 @@ describe('BaseTextElement imported text insets', () => {
     expect(markup).toContain('padding:10px');
   });
 });
+
+it.each([
+  '<div data-pptx-text-insets="true"><p>Text</p></div>',
+  "<div class='imported' data-pptx-text-insets='true' style='padding:0px'><p>Text</p></div>",
+  '<div style="padding-block: 4px" data-pptx-text-insets="true"><p>Text</p></div>',
+])('recognizes explicit PPTX insets without relying on padding shorthand: %s', (content) => {
+  const markup = renderToStaticMarkup(
+    React.createElement(BaseTextElement, { elementInfo: { ...textElement, content } }),
+  );
+  expect(markup).toContain('box-sizing:border-box;padding:0;');
+});
+
+it('does not treat a marker on a nested div as outer text insets', () => {
+  const markup = renderToStaticMarkup(
+    React.createElement(BaseTextElement, {
+      elementInfo: {
+        ...textElement,
+        content: '<div><div data-pptx-text-insets="true">Text</div></div>',
+      },
+    }),
+  );
+  expect(markup).toContain('padding:10px');
+});
