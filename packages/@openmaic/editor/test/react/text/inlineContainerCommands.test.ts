@@ -348,3 +348,56 @@ it.each(['caret', 'all', 'cross-container'])(
     }
   },
 );
+
+it.each(['inline_text_box', 'pptx_tab_column'])(
+  'preserves %s font context through font changes and undo/redo',
+  (containerType) => {
+    for (const command of ['fontsize', 'fontname'] as const) {
+      for (const mode of ['partial', 'all', 'caret']) {
+        const base = createTextDocument(
+          '<p><span style="font-family:Arial;font-size:2em"><span style="display:inline-block;width:10em">ABCD</span></span>X</p>',
+        );
+        const box = base.firstChild!.firstChild!;
+        const container = textSchema.nodes[containerType].create(box.attrs, box.content, box.marks);
+        const doc = textSchema.nodes.doc.create(
+          null,
+          textSchema.nodes.paragraph.create(null, [container, textSchema.text('X')]),
+        );
+        const selection =
+          mode === 'all'
+            ? new AllSelection(doc)
+            : TextSelection.create(doc, 3, mode === 'caret' ? 3 : 4);
+        const view = new EditorView(document.createElement('div'), {
+          state: EditorState.create({ doc, selection, plugins: buildPlugins(textSchema) }),
+        });
+        try {
+          const value = command === 'fontsize' ? '30px' : 'Georgia';
+          executeTextCommand(view, { command, value });
+          const edited = view.state.doc;
+          expect(edited.firstChild!.firstChild!.marks).toEqual(container.marks);
+          expect(edited.firstChild!.firstChild!.attrs).toEqual(container.attrs);
+          const runs: { text: string; value: string | undefined }[] = [];
+          edited.descendants((node) => {
+            if (node.isText)
+              runs.push({
+                text: node.text!,
+                value: node.marks.find((m) => m.type.name === command)?.attrs[command],
+              });
+          });
+          expect(
+            runs
+              .filter((run) => run.value === value)
+              .map((run) => run.text)
+              .join(''),
+          ).toBe(mode === 'partial' ? 'B' : 'ABCDX');
+          expect(undo(view.state, view.dispatch)).toBe(true);
+          expect(view.state.doc.eq(doc)).toBe(true);
+          expect(redo(view.state, view.dispatch)).toBe(true);
+          expect(view.state.doc.eq(edited)).toBe(true);
+        } finally {
+          view.destroy();
+        }
+      }
+    }
+  },
+);

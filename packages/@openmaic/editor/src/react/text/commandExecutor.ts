@@ -21,6 +21,22 @@ function applyMark(view: EditorView, markName: string, attrs?: Record<string, st
   const markType = view.state.schema.marks[markName];
   if (!markType) return;
   autoSelectAll(view);
+  if (markName === 'fontname' || markName === 'fontsize') {
+    const { from, to } = view.state.selection;
+    const tr = view.state.tr;
+    const mark = markType.create(attrs);
+    // Font marks on inline containers define the context for em/ch dimensions.
+    // Range-based addMark also visits those containers and its inverse can copy
+    // their marks onto children. Replace only selected leaves for exact undo.
+    view.state.doc.nodesBetween(from, to, (node, pos, parent) => {
+      if (!node.isInline || !node.isLeaf || !parent?.type.allowsMarkType(markType)) return;
+      const start = Math.max(pos, from);
+      const end = Math.min(pos + node.nodeSize, to);
+      tr.replaceWith(start, end, node.cut(start - pos, end - pos).mark(mark.addToSet(node.marks)));
+    });
+    view.dispatch(tr);
+    return;
+  }
   addMark(view, markType.create(attrs));
 }
 
