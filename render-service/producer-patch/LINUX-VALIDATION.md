@@ -68,7 +68,7 @@ media tree without cancellation. Require normal worker exit, reference rejection
 reservation retention, closed admission and the previous artifact unchanged.
 Do not inherit results from older fixture runs.
 
-The cross-review cleanup/PID revision has **NOT_RUN** installed Linux evidence.
+The cleanup/PID checks require installed Linux evidence for the exact candidate.
 Portable filesystem/owner regressions do not establish kernel enforcement or
 new package qualification. Historical results remain evidence only for their
 original source/package hashes. Code review closure does not close these runtime
@@ -80,9 +80,9 @@ framework or infer coverage from a case name alone.
 | Normal return and recovery | Run consecutive real exports and cleanable-failure recovery with the new installed package. Retained temporary objects must fit the unchanged budgets; reservations return, retained inputs and previous artifacts remain readable. |
 | Unknown reference during normal completion | Run `real-unknown-reference-normal`; require reference rejection after normal worker exit, quarantine, closed admission and no replacement of the previous artifact. |
 | Per-attempt PID enforcement | Run `pids-limit`; require kernel EAGAIN, task-local PID events, descendant drain and successful guardian cleanup with control-domain headroom. |
-| Failed cleanup cannot return a reservation | Portable tests cover a real filesystem rename failure and injected owner cleanup failures. `real-deletion-failure` additionally marks one task-owned file immutable, requires the actual guardian `unlink` to fail, and checks retained reservation/object, closed admission and unchanged output before the test platform removes that flag. This Linux case is NOT_RUN. |
-| A retains a reference while B completes | `real-retained-a-completes-b` gates both tasks on live media, retains an external link to A's private work file, lets A finish into quarantine, then allows the already-active B to finish. A's reservation/link must remain while B's reservation returns and its output decodes. No new work is admitted after quarantine. This Linux case is NOT_RUN. |
-| S restart and ownership transfer | `real-supervisor-death` rejects reuse of the unfinished session, verifies the old S/G and descendants exited, then lets the test platform remove the empty owned session before starting a new S. Require a decoded export, reservation return and clean new-session closure. This added recovery leg is NOT_RUN; it does not implement automatic product recovery or a persistent queue. |
+| Failed cleanup cannot return a reservation | Portable tests cover a real filesystem rename failure and injected owner cleanup failures. `real-deletion-failure` additionally marks one task-owned file immutable, requires the actual guardian `unlink` to fail, and checks retained reservation/object, closed admission and unchanged output before the test platform removes that flag. Record this case against the installed package identity. |
+| A retains a reference while B completes | `real-retained-a-completes-b` gates both tasks on live media, retains an external link to A's private work file, lets A finish into quarantine, then allows the already-active B to finish. A's reservation/link must remain while B's reservation returns and its output decodes. No new work is admitted after quarantine. Record this case against the installed package identity. |
+| S restart and ownership transfer | `real-supervisor-death` rejects reuse of the unfinished session, verifies the old S/G and descendants exited, then lets the test platform remove the empty owned session before starting a new S. Require a decoded export, reservation return and clean new-session closure. Record the recovery result separately from old-owner rejection; this does not implement automatic product recovery or a persistent queue. |
 
 The A/B case alone uses the existing Producer API with two active slots and an
 owner envelope of 2 CPU / 1536 MiB (two original task reservations). Each task
