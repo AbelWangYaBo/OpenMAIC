@@ -27,3 +27,21 @@ it.each([
 ])('does not compress already scaled text: %s', (xml) => {
   expect(renderTxBodyHtml(xml, undefined, { frameWidthPx: 146.8 })).not.toContain('width:0.5em');
 });
+
+it('does not compact punctuation inheriting a smaller paragraph font', () => {
+  const html = renderTxBodyHtml(
+    '<a:bodyPr wrap="square"/><a:p><a:pPr hangingPunct="1" algn="r"><a:defRPr sz="1200"/></a:pPr><a:r><a:rPr sz="2000"/><a:t>课前调研</a:t></a:r><a:r><a:t>：</a:t></a:r></a:p>',
+    undefined,
+    { frameWidthPx: 146.8 },
+  );
+  expect(html).toContain('font-size: 12pt');
+  expect(html).not.toContain('width:0.5em');
+});
+it('still compacts uniform inherited font sizes', () => {
+  const html = renderTxBodyHtml(
+    '<a:bodyPr wrap="square"/><a:p><a:pPr hangingPunct="1"><a:defRPr sz="2000"/></a:pPr><a:r><a:t>课前调研</a:t></a:r><a:r><a:t>：</a:t></a:r></a:p>',
+    undefined,
+    { frameWidthPx: 146.8 },
+  );
+  expect(html).toContain('width:0.5em');
+});

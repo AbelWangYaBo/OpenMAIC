@@ -26,6 +26,7 @@ export interface ChartOptionPayload {
   lineColor?: string;
   lineSmooth?: boolean;
   stack?: boolean;
+  percentStack?: boolean;
   importedStyle?: ImportedChartStyle;
 }
 
@@ -45,17 +46,34 @@ export const getChartOption = ({
   lineColor,
   lineSmooth,
   stack,
+  percentStack,
   importedStyle,
 }: ChartOptionPayload): EChartOption | null => {
+  if (!Array.isArray(data?.series) || data.series.length === 0 || !Array.isArray(data.labels)) {
+    return null;
+  }
   const textStyle = textColor ? { color: textColor } : {};
+  const normalize = stack && percentStack && ['bar', 'column', 'line', 'area'].includes(type);
+  const totals = normalize
+    ? Array.from({ length: Math.max(0, ...data.series.map((values) => values.length)) }, (_, i) =>
+        data.series.reduce((sum, values) => sum + Math.abs(values[i] ?? 0), 0),
+      )
+    : [];
+  const plotSeries = normalize
+    ? data.series.map((values) => values.map((value, i) => (totals[i] ? value / totals[i] : 0)))
+    : data.series;
+  const originalValueLabel = (seriesIndex: number) =>
+    normalize
+      ? {
+          formatter: ({ dataIndex }: { dataIndex: number }) =>
+            String(data.series[seriesIndex][dataIndex]),
+        }
+      : {};
 
   const axisLine = textColor ? { lineStyle: { color: textColor } } : undefined;
   const axisLabel = { show: true, color: textColor ?? '#333333' };
   const splitLine = lineColor ? { lineStyle: { color: lineColor } } : {};
 
-  if (!Array.isArray(data?.series) || data.series.length === 0 || !Array.isArray(data.labels)) {
-    return null;
-  }
   const categoryAxisLabel = {
     ...axisLabel,
     interval: data.labels.length <= 8 ? 0 : ('auto' as const),
@@ -152,7 +170,7 @@ export const getChartOption = ({
         : {}),
       xAxis: type === 'bar' ? category : value,
       yAxis: type === 'bar' ? value : category,
-      series: data.series.map((item, index) => {
+      series: plotSeries.map((item, index) => {
         const style = importedStyle?.series[index];
         // ECharts lays out bar and pictorialBar independently. Keep every
         // unstacked series in the same layout when any point uses a picture;
@@ -190,7 +208,7 @@ export const getChartOption = ({
                 clip: true,
               }
             : {}),
-          label: { show: style?.showValue ?? true },
+          label: { show: style?.showValue ?? true, ...originalValueLabel(index) },
           itemStyle: {
             borderRadius: importedStyle ? 0 : type === 'bar' ? [2, 2, 0, 0] : [0, 2, 2, 0],
           },
@@ -213,13 +231,13 @@ export const getChartOption = ({
       legend,
       xAxis: { type: 'category', data: data.labels, axisLine, axisLabel: categoryAxisLabel },
       yAxis: { type: 'value', axisLine, axisLabel, splitLine },
-      series: data.series.map((item, index) => {
+      series: plotSeries.map((item, index) => {
         const seriesItem: LineSeriesOption = {
           data: item,
           name: data.legends[index],
           type: 'line',
           smooth: lineSmooth,
-          label: { show: true },
+          label: { show: true, ...originalValueLabel(index) },
         };
         if (stack) seriesItem.stack = 'A';
         return seriesItem;
@@ -281,13 +299,13 @@ export const getChartOption = ({
         axisLabel: categoryAxisLabel,
       },
       yAxis: { type: 'value', axisLine, axisLabel, splitLine },
-      series: data.series.map((item, index) => {
+      series: plotSeries.map((item, index) => {
         const seriesItem: LineSeriesOption = {
           data: item,
           name: data.legends[index],
           type: 'line',
           areaStyle: {},
-          label: { show: true },
+          label: { show: true, ...originalValueLabel(index) },
         };
         if (stack) seriesItem.stack = 'A';
         return seriesItem;

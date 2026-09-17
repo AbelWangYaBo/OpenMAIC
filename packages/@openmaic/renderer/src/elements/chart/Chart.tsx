@@ -65,6 +65,7 @@ export function Chart({
       lineColor,
       lineSmooth: options?.lineSmooth || false,
       stack: options?.stack || false,
+      percentStack: options?.percentStack || false,
     });
 
     if (option) {

@@ -227,6 +227,7 @@ it('keeps explicitly unpainted category gridlines hidden', () => {
     ]),
   };
   const el = chartToElement(chartNode(), ctx, 0);
+  if (!('importedStyle' in el)) throw new Error('Expected bar chart style');
   expect(el.importedStyle?.categoryAxis?.gridlines).toBe(false);
 });
 
@@ -279,17 +280,11 @@ it.each(
     } as unknown as Parameters<typeof parsedToSlides>[0]);
     const chart = slides[0].elements[0];
     if (chart.type !== 'chart') throw new Error('expected chart');
-    expect(chart.data.series).toEqual(
-      grouping === 'percentStacked'
-        ? [
-            [0.4, 0, 0.5],
-            [0.6, 0, 0.5],
-          ]
-        : [
-            [40, 0, 20],
-            [60, 0, 20],
-          ],
-    );
+    expect(chart.data.series).toEqual([
+      [40, 0, 20],
+      [60, 0, 20],
+    ]);
+    expect(chart.options?.percentStack).toBe(grouping === 'percentStacked' ? true : undefined);
     expect(chart.importedStyle?.valueAxis?.max).toBe(1);
   },
 );

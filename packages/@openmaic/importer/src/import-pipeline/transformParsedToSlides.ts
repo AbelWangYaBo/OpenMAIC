@@ -1456,16 +1456,8 @@ export async function transformParsedToSlides(
             default:
           }
 
-          // Percent stacks use fractions even when the workbook stores raw counts.
-          // Sum absolute magnitudes so mixed signs cannot cancel or divide by zero.
           if (options.stack && 'grouping' in el && el.grouping === 'percentStacked') {
-            const pointCount = Math.max(0, ...series.map((values) => values.length));
-            const totals = Array.from({ length: pointCount }, (_, index) =>
-              series.reduce((total, values) => total + Math.abs(values[index] ?? 0), 0),
-            );
-            series = series.map((values) =>
-              values.map((value, index) => (totals[index] ? value / totals[index] : 0)),
-            );
+            options.percentStack = true;
           }
 
           const importedStyle = (el as typeof el & { importedStyle?: ImportedChartStyle })

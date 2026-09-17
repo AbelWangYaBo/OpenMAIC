@@ -1244,6 +1244,7 @@ export function renderTextBody(
           if (sz !== undefined) effectiveFontSize = sz / 100;
         }
       }
+      const inheritedFontSize = effectiveFontSize;
       if (paragraph.runs.length > 0 && paragraph.runs[0].properties) {
         const sz = paragraph.runs[0].properties.numAttr('sz');
         if (sz !== undefined) effectiveFontSize = sz / 100;
@@ -1278,7 +1279,7 @@ export function renderTextBody(
             !r.ommlXml &&
             !r.properties?.numAttr('spc') &&
             !r.properties?.numAttr('baseline') &&
-            (r.properties?.numAttr('sz') ?? effectiveFontSize * 100) === effectiveFontSize * 100,
+            (r.properties?.numAttr('sz') ?? inheritedFontSize * 100) === effectiveFontSize * 100,
         );
       const lastTextRun = [...paragraph.runs].reverse().find((r) => !!r.text);
 
