@@ -154,30 +154,41 @@ export const getChartOption = ({
       yAxis: type === 'bar' ? value : category,
       series: data.series.map((item, index) => {
         const style = importedStyle?.series[index];
-        const picture = !stack && Object.keys(style?.pointImages ?? {}).length > 0;
+        // ECharts lays out bar and pictorialBar independently. Keep every
+        // unstacked series in the same layout when any point uses a picture;
+        // points without images retain a rectangular symbol.
+        const picture = !!hasPicture;
         const seriesItem: BarSeriesOption | PictorialBarSeriesOption = {
-          data: style
-            ? item.map((n, i) => ({
-                value: n,
-                ...(picture
-                  ? {
-                      symbol: style.pointImages?.[String(i)]
-                        ? stretchedPictureSymbol(style.pointImages[String(i)])
-                        : 'rect',
-                    }
-                  : {}),
-                itemStyle: {
-                  color:
-                    style.pointFills?.[String(i)] ??
-                    style.fill ??
-                    themeColors[index % themeColors.length],
-                },
-              }))
-            : item,
+          data:
+            style || picture
+              ? item.map((n, i) => ({
+                  value: n,
+                  ...(picture
+                    ? {
+                        symbol: style?.pointImages?.[String(i)]
+                          ? stretchedPictureSymbol(style.pointImages[String(i)])
+                          : 'rect',
+                      }
+                    : {}),
+                  itemStyle: {
+                    color:
+                      style?.pointFills?.[String(i)] ??
+                      style?.fill ??
+                      themeColors[index % themeColors.length],
+                  },
+                }))
+              : item,
           name: data.legends[index],
           type: picture ? 'pictorialBar' : 'bar',
           ...(picture
-            ? { symbolSize: ['100%', '100%'], symbolRepeat: false, symbolClip: false }
+            ? {
+                symbolSize: ['100%', '100%'],
+                symbolRepeat: false,
+                symbolClip: false,
+                // Override pictorialBar's overlapping/unclipped defaults.
+                barGap: '20%',
+                clip: true,
+              }
             : {}),
           label: { show: style?.showValue ?? true },
           itemStyle: {
