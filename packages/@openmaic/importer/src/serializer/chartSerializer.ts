@@ -308,7 +308,7 @@ function chartAxis(
   const linked = !['0', 'false'].includes(numFmt.attr('sourceLinked') ?? '1');
   return {
     show: deleted === undefined ? undefined : !deleted,
-    gridlines: grid.exists(),
+    gridlines: grid.exists() && !grid.child('spPr').child('ln').child('noFill').exists(),
     gridlineColor: gridFill.exists() ? resolveColorToCss(gridFill, ctx) : undefined,
     lineColor: fill.exists() ? resolveColorToCss(fill, ctx) : undefined,
     lineVisible: line.exists() ? !line.child('noFill').exists() : undefined,

@@ -212,3 +212,84 @@ it.each([
   if (!('importedStyle' in el)) throw new Error('Expected bar chart style');
   expect(el.importedStyle?.valueAxis?.numberFormat).toBe(expected);
 });
+
+it('keeps explicitly unpainted category gridlines hidden', () => {
+  const ctx = minimalCtx();
+  ctx.presentation = {
+    ...ctx.presentation,
+    charts: new Map([
+      [
+        'ppt/charts/chart1.xml',
+        parseXml(
+          `<c:chartSpace ${NS}><c:chart><c:plotArea><c:barChart><c:ser/></c:barChart><c:catAx><c:majorGridlines><c:spPr><a:ln><a:noFill/></a:ln></c:spPr></c:majorGridlines></c:catAx></c:plotArea></c:chart></c:chartSpace>`,
+        ),
+      ],
+    ]),
+  };
+  const el = chartToElement(chartNode(), ctx, 0);
+  expect(el.importedStyle?.categoryAxis?.gridlines).toBe(false);
+});
+
+it.each(
+  ['barChart', 'lineChart', 'areaChart'].flatMap((chartType) =>
+    ['percentStacked', 'stacked'].flatMap((grouping) =>
+      [false, true].map((sparse) => [chartType, grouping, sparse] as const),
+    ),
+  ),
+)(
+  'converts %s %s (sparse labels: %s) without dropping values',
+  async (chartType, grouping, sparse) => {
+    const { parsedToSlides } = await import('../src/import-pipeline');
+    const slides = await parsedToSlides({
+      size: { width: 960, height: 540 },
+      themeColors: [],
+      slides: [
+        {
+          fill: { type: 'color', value: '#fff' },
+          note: '',
+          layoutElements: [],
+          elements: [
+            {
+              type: 'chart',
+              chartType,
+              grouping,
+              barDir: 'col',
+              left: 0,
+              top: 0,
+              width: 400,
+              height: 200,
+              order: 1,
+              colors: ['#ff0000', '#0000ff'],
+              data: [
+                [40, 0, 20],
+                [60, 0, 20],
+              ].map((values, i) => ({
+                key: String(i),
+                xlabels: sparse ? { 0: 'A', 2: 'C' } : { 0: 'A', 1: 'B', 2: 'C' },
+                values: values.map((y, x) => ({ x: String(x), y })),
+              })),
+              importedStyle: {
+                series: [{}, {}],
+                valueAxis: { min: 0, max: 1, numberFormat: '0%' },
+              },
+            },
+          ],
+        },
+      ],
+    } as unknown as Parameters<typeof parsedToSlides>[0]);
+    const chart = slides[0].elements[0];
+    if (chart.type !== 'chart') throw new Error('expected chart');
+    expect(chart.data.series).toEqual(
+      grouping === 'percentStacked'
+        ? [
+            [0.4, 0, 0.5],
+            [0.6, 0, 0.5],
+          ]
+        : [
+            [40, 0, 20],
+            [60, 0, 20],
+          ],
+    );
+    expect(chart.importedStyle?.valueAxis?.max).toBe(1);
+  },
+);
