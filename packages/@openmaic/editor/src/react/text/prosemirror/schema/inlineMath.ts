@@ -6,15 +6,15 @@ export const inlineMath: NodeSpec = {
   inline: true,
   group: 'inline',
   atom: true,
-  leafText: (node) => node.attrs.latex,
-  attrs: { latex: {} },
+  leafText: (node) => (typeof node.attrs.latex === 'string' ? node.attrs.latex : ''),
+  attrs: { latex: { default: '' } },
   parseDOM: [
     {
       tag: 'span[data-inline-math]',
       priority: 100,
       getAttrs: (dom) => {
         const latex = (dom as HTMLElement).getAttribute('data-inline-math');
-        return latex ? { latex } : false;
+        return latex !== null ? { latex } : false;
       },
     },
     {
@@ -29,15 +29,25 @@ export const inlineMath: NodeSpec = {
     },
   ],
   toDOM: (node) => {
+    const latex = typeof node.attrs.latex === 'string' ? node.attrs.latex : '';
     const host = document.createElement('span');
-    // Rebuild trusted markup from the source rather than storing arbitrary HTML.
-    katex.render(node.attrs.latex, host, {
-      displayMode: false,
-      throwOnError: false,
-      trust: false,
-    });
-    const formula = host.firstElementChild as HTMLElement;
-    formula.setAttribute('data-inline-math', node.attrs.latex);
+    // Empty/malformed source must not prevent the surrounding text from saving.
+    // Preserve the atom and source even when KaTeX cannot produce markup.
+    let formula = host;
+    if (latex.trim()) {
+      try {
+        // Rebuild trusted markup rather than storing arbitrary imported HTML.
+        katex.render(latex, host, {
+          displayMode: false,
+          throwOnError: false,
+          trust: false,
+        });
+        formula = (host.firstElementChild as HTMLElement | null) ?? host;
+      } catch {
+        host.textContent = latex;
+      }
+    }
+    formula.setAttribute('data-inline-math', latex);
     formula.setAttribute('contenteditable', 'false');
     return formula;
   },

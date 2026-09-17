@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import katex from 'katex';
+import { textSchema } from '../../../src/react/text/prosemirror/schema';
 import { EditorState } from 'prosemirror-state';
 import {
   createTextDocument,
@@ -31,4 +32,38 @@ describe('inline imported formulas', () => {
     expect(edited.eq(doc)).toBe(true);
     expect(createTextDocument(serializeTextDocument(edited)).eq(doc)).toBe(true);
   });
+});
+
+it.each([undefined, null, 42, {}, ''])(
+  'safely serializes missing or invalid formula source: %s',
+  (latex) => {
+    const math = textSchema.nodes.inline_math.create(latex === undefined ? undefined : { latex });
+    const doc = textSchema.nodes.doc.create(null, textSchema.nodes.paragraph.create(null, math));
+    expect(doc.textBetween(0, doc.content.size)).toBe('');
+    const html = serializeTextDocument(doc);
+    expect(html).toContain('data-inline-math=""');
+    const reopened = createTextDocument(html);
+    expect(reopened.firstChild!.firstChild!.type.name).toBe('inline_math');
+    expect(reopened.firstChild!.firstChild!.attrs.latex).toBe('');
+  },
+);
+
+it('falls back to escaped source if the formula renderer throws', () => {
+  const latex = '<img src=x onerror=alert(1)>';
+  const doc = textSchema.nodes.doc.create(
+    null,
+    textSchema.nodes.paragraph.create(null, textSchema.nodes.inline_math.create({ latex })),
+  );
+  const render = vi.spyOn(katex, 'render').mockImplementation(() => {
+    throw new Error('renderer failure');
+  });
+  try {
+    const host = document.createElement('div');
+    host.innerHTML = serializeTextDocument(doc);
+    expect(host.querySelector('img')).toBeNull();
+    expect(host.textContent).toBe(latex);
+    expect(createTextDocument(host.innerHTML).eq(doc)).toBe(true);
+  } finally {
+    render.mockRestore();
+  }
 });
