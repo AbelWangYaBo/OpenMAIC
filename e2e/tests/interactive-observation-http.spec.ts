@@ -32,7 +32,8 @@ function bundle(declared: boolean) {
       contents: `
 import React, {useLayoutEffect,useEffect,useMemo,useRef,useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {createObservationSession,withObservationResponder} from './lib/interactive/observation-bridge';
+import {createObservationSession} from './lib/interactive/observation-bridge';
+import {patchHtmlForIframe} from './lib/utils/iframe';
 import {supportsInteractiveObservation, OBSERVATION_SCOPE_ID} from './lib/interactive/observation';
 import {sampleInteractiveState} from './lib/interactive/chat-observation';
 const useI18n=()=>({t:k=>k});
@@ -47,7 +48,10 @@ import { intersectClientBoxes } from './lib/edit/visible-client-rect';
 ${component}
 window.sample=()=>sampleInteractiveState(
  {currentSceneId:'s',scenes:[{id:'s',content:{html:${JSON.stringify(html(declared))}}}]},new AbortController().signal);
-createRoot(document.getElementById('app')).render(<PooledIframe sceneId="s" entry={{srcDoc:${JSON.stringify(html(declared))},rect:{left:0,top:0,width:1000,height:700},clip:null,owner:'o'}} visible={true} playbackArmed={false}/>);
+// Mirrors the pool: identity is minted with the document, and only where the
+// browser supports it — crypto.randomUUID does not exist in insecure contexts.
+const IDENTITY=supportsInteractiveObservation()?{sceneId:'s',scopeId:'experiment',documentId:crypto.randomUUID()}:undefined;
+createRoot(document.getElementById('app')).render(<PooledIframe sceneId="s" entry={{srcDoc:patchHtmlForIframe(${JSON.stringify(html(declared))},IDENTITY),observationIdentity:IDENTITY,rect:{left:0,top:0,width:1000,height:700},clip:null,owner:'o'}} visible={true} playbackArmed={false}/>);
 `,
     },
     bundle: true,
@@ -86,11 +90,16 @@ for (const origin of ['http://openmaic-http.test/', 'http://localhost/']) {
       const packet = await page.evaluate(() =>
         (window as unknown as { sample(): Promise<unknown> }).sample(),
       );
-      if (!secure || !declared) {
-        // Insecure contexts and courseware without the interface stay unsampled;
-        // a static reference is untouched and the Host still reports unavailable.
+      if (!secure) {
+        // An insecure context cannot hash or mint an identity, so nothing is
+        // sampled at all and a static reference travels untouched.
         expect(packet).toBeUndefined();
       } else {
+        // Courseware without the interface is no longer pre-screened by a
+        // substring match on the source: the reader answers for itself, and the
+        // Host is what keeps a legacy unreferenced send unchanged (pinned by
+        // `element-reference-route-l2`). Here no reader is registered, so both
+        // shapes report `document-changed`.
         expect(packet).toMatchObject({
           snapshot: { status: 'unavailable', reason: 'document-changed' },
         });

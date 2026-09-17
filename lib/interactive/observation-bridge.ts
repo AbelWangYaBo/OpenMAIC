@@ -159,7 +159,22 @@ export function createObservationSession(iframe: HTMLIFrameElement, identity: Ob
           window.removeEventListener('message', receive);
           signal?.removeEventListener('abort', abort);
           pending.delete(invalidate);
-          resolve(freezeEvidence({ ...context, receivedAt: Date.now(), ...data }));
+          // Teardown has already run, so nothing else can settle this promise.
+          // A report that defeats the recursion in freezing must degrade here,
+          // not leave a send waiting on a sample that never arrives.
+          const receivedAt = Date.now();
+          try {
+            resolve(freezeEvidence({ ...context, receivedAt, ...data }));
+          } catch {
+            resolve(
+              freezeEvidence({
+                ...context,
+                receivedAt,
+                status: 'unavailable' as const,
+                reason: 'invalid-data' as const,
+              }),
+            );
+          }
         };
         const abort = () => finish({ status: 'unavailable', reason: 'cancelled' });
         const invalidate = () => finish({ status: 'unavailable', reason: 'document-changed' });
@@ -182,7 +197,7 @@ export function createObservationSession(iframe: HTMLIFrameElement, identity: Ob
             return finish({ status: 'unavailable', reason: d.reason });
           finish(
             typeof d.raw === 'string'
-              ? parseObservation(d.raw, identity.scopeId)
+              ? parseObservation(d.raw)
               : { status: 'unavailable', reason: 'invalid-data' },
           );
         };
@@ -203,9 +218,17 @@ export function createObservationSession(iframe: HTMLIFrameElement, identity: Ob
   };
 }
 
-/** Only new content declaring an outlet gets an injected reader. Existing documents are untouched. */
+/**
+ * Injects the reader shim. Called only by `patchHtmlForIframe`, alongside the
+ * other iframe shims rather than through a second rewriting path, and without
+ * sniffing for the attribute: a document that publishes no outlet answers
+ * `no-interface`, which is authoritative where a substring match was a guess.
+ *
+ * Injection stays at body end. `installObservationResponder` captures the scope
+ * element when it runs, so a head injection would capture nothing and report
+ * `scope-changed` for every later read.
+ */
 export function withObservationResponder(html: string, identity: ObservationIdentity): string {
-  if (!html.includes('data-maic-observation')) return html;
   const script =
     '<script data-maic-observation-reader>(' +
     installObservationResponder.toString() +

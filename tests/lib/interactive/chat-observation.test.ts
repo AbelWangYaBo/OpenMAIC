@@ -16,24 +16,8 @@ function snapshot(value: number, sceneId = 's'): ObservationSnapshot {
     receivedAt: 2,
     status: 'available',
     observation: {
-      version: 1,
-      scope: { id: 'experiment', label: 'Activity' },
-      current: {
-        revision: value,
-        updatedAt: 1,
-        graph: {
-          objects: [
-            {
-              id: 'o',
-              label: 'Number',
-              facts: [{ key: 'value', label: 'Value', status: 'known', value }],
-            },
-          ],
-          relations: { status: 'complete', items: [] },
-          missing: [],
-        },
-      },
-      rendered: { status: 'unknown', reason: 'not yet' },
+      summary: `The number is ${value}.`,
+      state: { number: value },
     },
   };
 }
@@ -54,8 +38,7 @@ const unavailable = (
 function knownValue(packet: { snapshot: ObservationSnapshot } | undefined) {
   const current = packet?.snapshot;
   if (!current || current.status === 'unavailable') return undefined;
-  const fact = current.observation.current.graph.objects[0].facts[0];
-  return fact.status === 'known' ? fact.value : undefined;
+  return (current.observation as { state: { number: number } }).state.number;
 }
 
 const GATE = 'NEXT_PUBLIC_COURSEWARE_REFERENCE_ENABLED';
@@ -156,18 +139,22 @@ it('propagates cancellation instead of sending a half-collected sample', async (
   });
 });
 
-it('leaves courseware without the interface unsampled, so legacy scenes are unchanged', async () => {
+it('asks the reader on courseware without the interface and relays its own answer', async () => {
+  // The reader is installed in every pooled document, so the source is no longer
+  // pre-screened by a substring match: a page that declares no outlet says so
+  // itself. Whether that answer becomes evidence is the Host's decision, pinned
+  // by `element-reference-route-l2`, not this module's.
   let calls = 0;
   useWidgetIframeStore.getState().registerObservation('s', async () => {
     calls++;
-    return snapshot(9);
+    return { ...snapshot(9), status: 'unavailable' as const, reason: 'no-interface' as const };
   });
   const packet = await sampleInteractiveState(
     { currentSceneId: 's', scenes: [{ id: 's', content: { html: legacy } }] },
     signal(),
   );
-  expect(packet).toBeUndefined();
-  expect(calls).toBe(0);
+  expect(packet?.snapshot).toMatchObject({ status: 'unavailable', reason: 'no-interface' });
+  expect(calls).toBe(1);
 });
 
 it('omits runtime evidence when the browser rejects hashing', async () => {

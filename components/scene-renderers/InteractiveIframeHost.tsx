@@ -1,13 +1,8 @@
 'use client';
 
 import { useLayoutEffect, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import {
-  createObservationSession,
-  withObservationResponder,
-} from '@/lib/interactive/observation-bridge';
-import { OBSERVATION_SCOPE_ID } from '@/lib/interactive/observation';
+import { createObservationSession } from '@/lib/interactive/observation-bridge';
 import { createPortal } from 'react-dom';
-import { supportsInteractiveObservation } from '@/lib/interactive/observation';
 import { useWidgetIframeStore } from '@/lib/store/widget-iframe';
 import {
   useInteractiveIframePool,
@@ -238,19 +233,11 @@ function PooledIframe({
 }: PooledIframeProps) {
   const { t } = useI18n();
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const observation = useMemo(() => {
-    if (!entry.srcDoc?.includes('data-maic-observation') || !supportsInteractiveObservation())
-      return { html: entry.srcDoc, identity: undefined };
-    const identity = {
-      sceneId,
-      scopeId: OBSERVATION_SCOPE_ID,
-      documentId: crypto.randomUUID(),
-    };
-    return {
-      identity,
-      html: entry.srcDoc ? withObservationResponder(entry.srcDoc, identity) : undefined,
-    };
-  }, [entry.srcDoc, sceneId]);
+  // `srcDoc` already carries every shim, the observation reader included; the
+  // reader is installed for each pooled document and one that publishes no
+  // outlet answers `no-interface`. This reads the identity baked into that
+  // document rather than minting a second, disagreeing one.
+  const observation = { html: entry.srcDoc, identity: entry.observationIdentity };
   const observationSession = useRef<ReturnType<typeof createObservationSession> | null>(null);
   const registerObservation = useWidgetIframeStore((s) => s.registerObservation);
   useLayoutEffect(() => {

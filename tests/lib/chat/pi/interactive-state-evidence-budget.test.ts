@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  ElementReferenceValidationError,
   INTERACTIVE_PACKET_LIMIT,
   codePointLength,
   resolveSlideElementReference,
   type ResolvedInteractiveComponentReference,
 } from '@/lib/chat/pi/element-reference';
 import { attachInteractiveState } from '@/lib/chat/pi/interactive-state-evidence';
+import { exceedsDepth, OBSERVATION_MAX_DEPTH } from '@/lib/interactive/observation';
 
 /** Mirrors the module's own budget: the static packet bound plus the note frame. */
 const NOTE_FRAME_BUDGET = 8_000;
@@ -16,8 +18,7 @@ const html =
   '<main id="experiment"><input id="density" value="1000">' +
   '<script type="application/json" data-maic-observation>{}</script></main>';
 
-function makeBody(observationGraph: unknown) {
-  const graph = observationGraph as Record<string, unknown>;
+function makeBody(report: unknown) {
   const now = Date.now();
   return {
     storeState: {
@@ -41,12 +42,7 @@ function makeBody(observationGraph: unknown) {
         requestedAt: now,
         receivedAt: now,
         status: 'available',
-        observation: {
-          version: 1,
-          scope: { id: 'experiment', label: 'Interactive area' },
-          current: { revision: 1, updatedAt: now, graph },
-          rendered: { status: 'known', basedOnRevision: 0, renderedAt: now, graph },
-        },
+        observation: report,
       },
     },
   };
@@ -107,24 +103,15 @@ function slideBody(graph: unknown, cells = 1) {
   };
 }
 
-const smallGraph = {
-  objects: [{ id: 'liquid', label: 'Liquid', facts: [] }],
-  relations: { status: 'complete', items: [] },
-  missing: [] as string[],
-};
+const smallState = { summary: 'The liquid density is 1000.', state: { density: 1000 } };
 
-/** Legal content: `<` is allowed in labels and values, and escaping expands it sixfold. */
-const oversizedGraph = {
-  objects: Array.from({ length: 18 }, (_, i) => ({
-    id: `object-${i}`,
-    label: '<'.repeat(240),
-    facts: [{ key: 'k', label: 'K', status: 'known', value: '<'.repeat(300) }],
-  })),
-  relations: {
-    status: 'complete',
-    items: [{ from: 'object-0', to: 'object-1', kind: 'link', label: 'A to B' }],
-  },
-  missing: [] as string[],
+/** Legal content: `<` is allowed anywhere in the report, and escaping expands it sixfold. */
+const oversizedState = {
+  summary: 'A report whose free-form state escapes into a much larger prompt body.',
+  state: Object.fromEntries(Array.from({ length: 18 }, (_, i) => [`object-${i}`, '<'.repeat(540)])),
+  rendered: Object.fromEntries(
+    Array.from({ length: 18 }, (_, i) => [`object-${i}`, '<'.repeat(540)]),
+  ),
 };
 
 describe('interactive state evidence output budget', () => {
@@ -139,12 +126,29 @@ describe('interactive state evidence output budget', () => {
     else process.env[flag] = original;
   });
 
+  it.each([[{ density: 1400 }], 'density is 1400', 1400, false, null].map((value) => [value]))(
+    'passes JSON report %j to model evidence unchanged',
+    (report) => {
+      const { stateNote } = attachInteractiveState(makeBody(report) as never, undefined);
+      const serialized = stateNote!
+        .split('<page_reported_state>\n')[1]
+        .split('\n</page_reported_state>')[0];
+      expect(JSON.parse(serialized)).toMatchObject({ status: 'available', observation: report });
+    },
+  );
+
+  it('rejects an absent JSON report with a validation error', () => {
+    expect(() => attachInteractiveState(makeBody(undefined) as never, undefined)).toThrow(
+      ElementReferenceValidationError,
+    );
+  });
+
   it('keeps the fixed note frame inside the room reserved for it', () => {
     // With no packet at all the note carries only its frame and a short body.
     // If a future prompt edit outgrows this, the degradation below stops
     // converging, so the budget has to fail here rather than silently.
     const { stateNote } = attachInteractiveState(
-      { storeState: makeBody(smallGraph).storeState, interactiveState: undefined } as never,
+      { storeState: makeBody(smallState).storeState, interactiveState: undefined } as never,
       undefined,
     );
     expect(stateNote).toBeDefined();
@@ -152,37 +156,79 @@ describe('interactive state evidence output budget', () => {
   });
 
   it.each([
-    ['an ordinary packet', smallGraph],
-    ['a packet that escapes past the budget', oversizedGraph],
-  ])('holds every exit inside the budget for %s', (_name, graph) => {
-    const referencedResult = attachInteractiveState(makeBody(graph) as never, maximalReference());
+    ['an ordinary packet', smallState],
+    ['a packet that escapes past the budget', oversizedState],
+  ])('holds every exit inside the budget for %s', (_name, report) => {
+    const referencedResult = attachInteractiveState(makeBody(report) as never, maximalReference());
     const attached = referencedResult.elementReference as ResolvedInteractiveComponentReference;
     expect(codePointLength(attached.childEvidence)).toBeLessThanOrEqual(COMBINED_EVIDENCE_LIMIT);
     expect(codePointLength(attached.directorSummary)).toBeLessThanOrEqual(COMBINED_EVIDENCE_LIMIT);
 
-    const unreferencedResult = attachInteractiveState(makeBody(graph) as never, undefined);
+    const unreferencedResult = attachInteractiveState(makeBody(report) as never, undefined);
     expect(codePointLength(unreferencedResult.stateNote as string)).toBeLessThanOrEqual(
       COMBINED_EVIDENCE_LIMIT,
     );
   });
 
+  it('rejects a deeply nested report as a validation error, not a stack overflow', () => {
+    // Free-form JSON means a report can be legal, small, and still defeat every
+    // later walk over it — measuring its own bytes included. Without a depth
+    // bound the Host raises RangeError, which the route surfaces as a server
+    // error instead of a rejected packet.
+    let deep: unknown = 1;
+    for (let i = 0; i < 10_000; i++) deep = [deep];
+    const body = makeBody({ summary: 'deep', state: deep });
+    let thrown: unknown;
+    try {
+      attachInteractiveState(body as never, undefined);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(ElementReferenceValidationError);
+    expect(thrown).not.toBeInstanceOf(RangeError);
+  });
+
+  it('spends the depth budget on the report, not on the packet it travels in', () => {
+    // The browser measures the report itself. Measuring the packet against the
+    // same number here would charge the report for `snapshot` and `observation`
+    // and reject, at 63 and 64 levels, a report the page was told it could send.
+    const report = (levels: number) => {
+      let nested: unknown = 1;
+      for (let i = 1; i < levels; i++) nested = [nested];
+      return { summary: `${levels} deep`, state: nested };
+    };
+    const attach = (levels: number) => {
+      try {
+        attachInteractiveState(makeBody(report(levels)) as never, undefined);
+        return 'accepted';
+      } catch {
+        return 'rejected';
+      }
+    };
+    for (const levels of [62, 63, OBSERVATION_MAX_DEPTH]) {
+      expect(exceedsDepth(report(levels))).toBe(false);
+      expect(attach(levels)).toBe('accepted');
+    }
+    expect(exceedsDepth(report(OBSERVATION_MAX_DEPTH + 1))).toBe(true);
+    expect(attach(OBSERVATION_MAX_DEPTH + 1)).toBe('rejected');
+  });
+
   it('degrades structurally instead of truncating the packet', () => {
-    const { stateNote } = attachInteractiveState(makeBody(oversizedGraph) as never, undefined);
+    const { stateNote } = attachInteractiveState(makeBody(oversizedState) as never, undefined);
     const note = stateNote as string;
     const body = note.slice(
       note.indexOf('<page_reported_state>') + '<page_reported_state>\n'.length,
       note.indexOf('</page_reported_state>') - 1,
     );
-    // Still valid JSON, not a cut fragment, and it no longer claims a complete set.
+    // Still valid JSON, not a cut fragment, and it carries no partial state.
     expect(JSON.parse(body)).toEqual({ status: 'unavailable', reason: 'too-large' });
-    expect(note).toContain('Current relationship evidence is unavailable');
-    expect(note).not.toContain('Current relationship evidence is COMPLETE');
+    expect(note).not.toContain('object-0');
   });
 
-  it.each([smallGraph, oversizedGraph])(
+  it.each([smallState, oversizedState])(
     'budgets slide state without changing slide identity',
-    (graph) => {
-      const body = slideBody(graph);
+    (report) => {
+      const body = slideBody(report);
       const reference = resolveSlideElementReference(body as never)!;
       const result = attachInteractiveState(body as never, reference);
       expect(result.elementReference).toBe(reference);
@@ -194,23 +240,20 @@ describe('interactive state evidence output budget', () => {
         );
       }
       expect(result.stateNote).toContain(
-        graph === smallGraph ? '"status":"available"' : '"reason":"too-large"',
+        report === smallState ? '"status":"available"' : '"reason":"too-large"',
       );
     },
   );
 
   it('counts slide evidence when deciding whether otherwise valid state fits', () => {
-    const body = slideBody(smallGraph, 60);
-    const value = 'v'.repeat(300);
-    const graph = {
-      ...smallGraph,
-      objects: Array.from({ length: 18 }, (_, i) => ({
-        id: `object-${i}`,
-        label: 'Object',
-        facts: [{ key: 'k', label: 'K', status: 'known', value }],
-      })),
+    const body = slideBody(smallState, 60);
+    const report = {
+      summary: 'A report that fits alone but not beside large slide evidence.',
+      state: Object.fromEntries(
+        Array.from({ length: 18 }, (_, i) => [`object-${i}`, 'v'.repeat(700)]),
+      ),
     };
-    body.interactiveState = makeBody(graph).interactiveState;
+    body.interactiveState = makeBody(report).interactiveState;
     const standalone = attachInteractiveState(body as never, undefined).stateNote!;
     const reference = resolveSlideElementReference(body as never)!;
     expect(codePointLength(standalone)).toBeLessThan(COMBINED_EVIDENCE_LIMIT);
@@ -226,13 +269,12 @@ describe('interactive state evidence output budget', () => {
   });
 
   it('preserves existing large slide evidence and bounds the added unavailable frame', () => {
-    const body = slideBody(smallGraph, 200);
+    const body = slideBody(smallState, 200);
     const reference = resolveSlideElementReference(body as never)!;
     expect(codePointLength(reference.childEvidence)).toBeGreaterThan(COMBINED_EVIDENCE_LIMIT);
     const result = attachInteractiveState(body as never, reference);
     expect(result.elementReference).toBe(reference);
     expect(result.stateNote).toContain('"reason":"too-large"');
-    expect(result.stateNote).not.toContain('Current relationship evidence is COMPLETE');
     expect(codePointLength('\n\n' + result.stateNote)).toBeLessThanOrEqual(NOTE_FRAME_BUDGET);
   });
 });

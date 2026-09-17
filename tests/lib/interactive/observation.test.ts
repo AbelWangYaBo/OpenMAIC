@@ -1,131 +1,108 @@
 import { describe, expect, it } from 'vitest';
-import {
-  freezeEvidence,
-  parseObservation,
-  type Observation,
-} from '../../../lib/interactive/observation';
-const fixture = (): Observation => ({
-  version: 1,
-  scope: { id: 'experiment', label: 'Experiment' },
-  current: {
-    revision: 2,
-    updatedAt: 100,
-    graph: {
-      objects: [
-        {
-          id: 'source',
-          label: 'Source',
-          facts: [{ key: 'voltage', label: 'Voltage', status: 'known', value: 6, unit: 'V' }],
-        },
-        {
-          id: 'switch',
-          label: 'Switch',
-          facts: [{ key: 'closed', label: 'Closed', status: 'known', value: false }],
-        },
-      ],
-      relations: {
-        status: 'complete',
-        items: [{ from: 'source', to: 'switch', kind: 'wire', label: 'Connection' }],
-      },
-      missing: [],
-    },
+import { freezeEvidence, parseObservation } from '../../../lib/interactive/observation';
+
+const fixture = () => ({
+  summary: 'Liquid density is 1400 kg/m³ and buoyancy is 4.116 N.',
+  state: {
+    liquid: { density: 1400, unit: 'kg/m³', buoyancy: 4.116 },
+    object: { displacedVolume: 300, fullySubmerged: true },
   },
-  rendered: { status: 'unknown', reason: 'Not rendered yet' },
+  rendered: { liquid: { density: 1000, buoyancy: 3.0 } },
 });
-const parse = (x: unknown) => parseObservation(JSON.stringify(x), 'experiment');
-describe('experimental semantic observation boundary', () => {
-  it('preserves object identity, typed facts and exact relation endpoints without widget types', () => {
-    const x = fixture();
-    x.rendered = {
-      status: 'known',
-      basedOnRevision: 2,
-      renderedAt: 101,
-      graph: structuredClone(x.current.graph),
-    };
-    expect(parse(x)).toEqual({ status: 'available', observation: x });
-  });
-  it('preserves current and last-rendered facts separately, even when revisions differ', () => {
-    const x = fixture();
-    x.rendered = {
-      status: 'known',
-      basedOnRevision: 1,
-      renderedAt: 90,
-      graph: structuredClone(x.current.graph),
-    };
-    x.rendered.graph.objects[0].facts[0] = {
-      key: 'voltage',
-      label: 'Voltage',
-      status: 'known',
-      value: 3,
-      unit: 'V',
-    };
-    const r = parse(x);
-    expect(r.status).toBe('available');
-    if (r.status !== 'unavailable' && r.observation.rendered.status === 'known') {
-      expect(r.observation.current.graph.objects[0].facts[0]).toHaveProperty('value', 6);
-      expect(r.observation.rendered.graph.objects[0].facts[0]).toHaveProperty('value', 3);
-    }
-  });
-  it('keeps missing rendered data unknown, not a copy of current or source defaults', () => {
-    expect(parse(fixture())).toMatchObject({
-      status: 'partial',
-      observation: { rendered: { status: 'unknown' } },
+const parse = (x: unknown) => parseObservation(JSON.stringify(x));
+
+describe('declared observation boundary', () => {
+  it('delivers a report that drifts from the asked-for shape rather than dropping it', () => {
+    // Generation asks for a summary and a state; reading enforces neither. A
+    // readable account of the activity must not be discarded over a field name,
+    // which is what a required-field check used to do.
+    const { summary: _missing, ...noSummary } = fixture();
+    expect(parse(noSummary)).toMatchObject({ status: 'available', observation: noSummary });
+    expect(parse({ ...fixture(), summary: '' }).status).toBe('available');
+    expect(parse({ ...fixture(), summary: 'x'.repeat(4000) }).status).toBe('available');
+    expect(parse({ state: { density: 1400 } })).toMatchObject({
+      status: 'available',
+      observation: { state: { density: 1400 } },
     });
   });
-  it('distinguishes unknown relations from a known empty relation set', () => {
-    const x = fixture();
-    x.current.graph.relations = { status: 'unknown', reason: 'Unavailable' };
-    const r = parse(x);
-    expect(r).toMatchObject({ status: 'partial' });
-    if (r.status !== 'unavailable')
-      expect(r.observation.current.graph.relations).not.toHaveProperty('items');
+
+  it.each([[{ density: 1400 }], 'density is 1400', 1400, false, null].map((value) => [value]))(
+    'preserves any JSON report: %j',
+    (value) => {
+      expect(parse(value)).toEqual({ status: 'available', observation: value });
+    },
+  );
+
+  it('bounds nesting, which bytes do not bound', () => {
+    // 20 KB of JSON can nest ten thousand levels, and every later step over a
+    // report recurses. Past the bound the sample is unavailable, never a throw.
+    // Built as text, the way the reader actually receives it: serializing this
+    // in the test would overflow before `parseObservation` ever saw it.
+    const nested = '['.repeat(10_000) + '1' + ']'.repeat(10_000);
+    const raw = `{"summary":"deep","state":${nested}}`;
+    expect(new TextEncoder().encode(raw).length).toBeLessThan(32_768);
+    expect(parseObservation(raw)).toEqual({ status: 'unavailable', reason: 'too-large' });
+    let ordinary: unknown = 1;
+    for (let i = 0; i < 40; i++) ordinary = [ordinary];
+    expect(parse({ summary: 'ordinary', state: ordinary }).status).toBe('available');
   });
-  it.each([
-    'duplicate-object',
-    'duplicate-fact',
-    'dangling-edge',
-    'duplicate-edge',
-    'future-render',
-  ])('rejects %s', (kind) => {
-    const x = fixture();
-    if (kind === 'duplicate-object') x.current.graph.objects.push(x.current.graph.objects[0]);
-    if (kind === 'duplicate-fact')
-      x.current.graph.objects[0].facts.push(x.current.graph.objects[0].facts[0]);
-    if (x.current.graph.relations.status === 'complete') {
-      if (kind === 'dangling-edge') x.current.graph.relations.items[0].to = 'not-in-scope';
-      if (kind === 'duplicate-edge')
-        x.current.graph.relations.items.push(x.current.graph.relations.items[0]);
-    }
-    if (kind === 'future-render')
-      x.rendered = { status: 'known', basedOnRevision: 3, renderedAt: 100, graph: x.current.graph };
-    expect(parse(x)).toEqual({ status: 'unavailable', reason: 'invalid-data' });
+
+  it('carries whatever shape the lesson tracks, without interpreting it', () => {
+    const wiring = {
+      summary: 'The battery is wired to the switch; the lamp is not connected yet.',
+      state: {
+        components: [
+          { id: 'battery', placed: true },
+          { id: 'lamp', placed: true },
+        ],
+        wires: [{ from: 'battery', to: 'switch' }],
+        unmeasured: null,
+      },
+    };
+    const parsed = parse(wiring);
+    expect(parsed).toMatchObject({ status: 'available', observation: wiring });
   });
-  it('rejects extra authority fields and wrong scope/version rather than stripping them', () => {
-    expect(parse({ ...fixture(), spotlightElementIds: ['anything'] }).status).toBe('unavailable');
-    expect(parse({ ...fixture(), version: 2 }).status).toBe('unavailable');
-    const x = fixture();
-    x.scope.id = 'other';
-    expect(parse(x).status).toBe('unavailable');
+
+  it('passes an unexpected field through instead of failing the whole report', () => {
+    // A generator that adds a field must not silently lose the capability for
+    // that lesson, which is what strict structural validation used to do.
+    const parsed = parse({ ...fixture(), lessonSpecificExtra: { steps: 3 } });
+    expect(parsed.status).toBe('available');
+    if (parsed.status === 'available')
+      expect(parsed.observation).toHaveProperty('lessonSpecificExtra', { steps: 3 });
   });
+
+  it('keeps rendered optional and separate from current state', () => {
+    const { rendered: _omitted, ...immediate } = fixture();
+    const parsed = parse(immediate);
+    expect(parsed.status).toBe('available');
+    if (parsed.status === 'available') expect(parsed.observation).not.toHaveProperty('rendered');
+    const lagging = parse(fixture());
+    if (lagging.status === 'available')
+      expect(lagging.observation).toMatchObject({
+        state: fixture().state,
+        rendered: fixture().rendered,
+      });
+  });
+
   it('bounds UTF-8 bytes and rejects malformed JSON', () => {
-    expect(parseObservation('\u4e2d'.repeat(12000), 'experiment')).toEqual({
+    expect(parseObservation('中'.repeat(12000))).toEqual({
       status: 'unavailable',
       reason: 'too-large',
     });
-    expect(parseObservation('{', 'experiment')).toEqual({
-      status: 'unavailable',
-      reason: 'invalid-data',
-    });
+    expect(parseObservation('{')).toEqual({ status: 'unavailable', reason: 'invalid-data' });
   });
-  it('does not reinterpret instruction-like labels as commands, and freezes the detached result', () => {
+
+  it('does not reinterpret instruction-like text as commands, and freezes the detached result', () => {
     const x = fixture();
-    x.current.graph.objects[0].label = '<img onerror="sendSecrets()">';
+    (x.state as { liquid: { label?: string } }).liquid.label = '<img onerror="sendSecrets()">';
     const r = freezeEvidence(parse(x));
     if (r.status !== 'unavailable') {
-      expect(Object.isFrozen(r.observation.current.graph.objects[0])).toBe(true);
-      expect(r.observation.current.graph.objects[0].label).toContain('<img');
-      x.current.graph.objects[0].label = 'changed later';
-      expect(r.observation.current.graph.objects[0].label).toContain('<img');
+      const liquid = (r.observation as { state: { liquid: { label: string } } }).state.liquid;
+      expect(Object.isFrozen(liquid)).toBe(true);
+      expect(liquid.label).toContain('<img');
+      (x.state as { liquid: { label?: string } }).liquid.label = 'changed later';
+      expect(liquid.label).toContain('<img');
     }
   });
 });

@@ -1,7 +1,6 @@
 import { isCoursewareReferenceEnabled } from '@/lib/config/feature-flags';
 import { useWidgetIframeStore } from '@/lib/store/widget-iframe';
 import {
-  OBSERVATION_ATTRIBUTE,
   OBSERVATION_SCOPE_ID,
   freezeEvidence,
   supportsInteractiveObservation,
@@ -50,9 +49,6 @@ export async function sampleInteractiveState(
   )
     return undefined;
   const sourceHtml = content.html;
-  // Only a Scene that declares the interface is sampled. Legacy courseware keeps
-  // its existing unreferenced behaviour untouched.
-  if (!sourceHtml.includes(OBSERVATION_ATTRIBUTE)) return undefined;
   let hash: ArrayBuffer;
   try {
     hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(sourceHtml));

@@ -32,15 +32,20 @@ describe('actual interactive generation path — no model calls', () => {
           expect(system).toContain(
             'declared current state for newly generated interactive content (v1)',
           );
-          expect(system).toContain('basedOnRevision');
-          expect(system).toContain('ALWAYS an array of nonempty STRINGS');
-          expect(system).toContain('function completeRender(started, graphActuallyDrawn)');
-          expect(system).toContain('Publish error invalidates the old node');
-          expect(system).toContain('complete` promises an exhaustive relationship set');
-          expect(system).toContain(
-            'a complete empty set establishes that there are no relationships there',
-          );
-          expect(system).toContain('history must not fill it');
+          // One required field, and the rest deliberately unconstrained.
+          expect(system).toContain('Always include it');
+          expect(system).toContain('Shape it however fits the activity');
+          expect(system).toContain('extra fields are allowed and are passed through unchanged');
+          expect(system).toContain('without checking field names or types');
+          expect(system).toContain('32768 bytes');
+          // The parts the reviewer asked to keep.
+          expect(system).toContain('function publishState(observation)');
+          expect(system).toContain('after every semantic change');
+          expect(system).toContain('Do not add a state-request message listener');
+          // No structural protocol is imposed on the generator any more.
+          expect(system).not.toContain('basedOnRevision');
+          expect(system).not.toContain('relations');
+          expect(system).not.toContain('exhaustive');
           expect(system).not.toContain('{{snippet:');
           return response;
         },

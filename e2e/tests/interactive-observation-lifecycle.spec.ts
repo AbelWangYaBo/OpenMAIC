@@ -31,18 +31,10 @@ const patchBundle = buildSync({
   format: 'iife',
   globalName: 'IframeUtils',
 }).outputFiles[0].text;
-const graph = {
-  objects: [
-    { id: 'o', label: 'Object', facts: [{ key: 'v', label: 'Value', status: 'known', value: 7 }] },
-  ],
-  relations: { status: 'complete', items: [] },
-  missing: [],
-};
 const observation = {
-  version: 1,
-  scope: { id: 'experiment', label: 'Test' },
-  current: { revision: 0, updatedAt: 1, graph },
-  rendered: { status: 'known', basedOnRevision: 0, renderedAt: 1, graph },
+  summary: 'The value is 7.',
+  state: { value: 7 },
+  rendered: { value: 7 },
 };
 const html = `<main id="experiment"><script type="application/json" data-maic-observation>${JSON.stringify(observation)}</script></main>`;
 test.beforeEach(async ({ page }) => {
@@ -83,7 +75,7 @@ test('timeout/cancel remove listeners; late old reply cannot overwrite or satisf
   const frame = page.frames().find((f) => f.parentFrame())!;
   await frame.locator('script[data-maic-observation]').evaluate((el) => {
     const data = JSON.parse(el.textContent!);
-    data.current.graph.objects[0].facts[0].value = 19;
+    data.state.value = 19;
     el.textContent = JSON.stringify(data);
   });
   await page.evaluate(
@@ -91,7 +83,7 @@ test('timeout/cancel remove listeners; late old reply cannot overwrite or satisf
   );
   expect(await page.evaluate('next')).toMatchObject({
     status: 'available',
-    observation: { current: { graph: { objects: [{ facts: [{ value: 19 }] }] } } },
+    observation: { state: { value: 19 } },
   });
   await page.evaluate(
     `addEventListener('message',block,true);window.abort=new AbortController();window.cancelled=session.capture({signal:abort.signal});abort.abort();`,
@@ -187,12 +179,12 @@ for (const ending of ['</BoDy   ></html>', '']) {
       const frame = page.frames().find((f) => f.parentFrame())!;
       expect(
         JSON.parse((await frame.locator('script[data-maic-observation]').textContent()) || '{}'),
-      ).toMatchObject({ current: { graph: { objects: [{ facts: [{ value: 7 }] }] } } });
+      ).toMatchObject({ state: { value: 7 } });
       if (reader) {
         await page.evaluate('window.session=Bridge.createObservationSession(f,identity)');
         expect(await page.evaluate('session.capture()')).toMatchObject({
           status: 'available',
-          observation: { current: { graph: { objects: [{ facts: [{ value: 7 }] }] } } },
+          observation: { state: { value: 7 } },
         });
       }
     }
@@ -200,12 +192,36 @@ for (const ending of ['</BoDy   ></html>', '']) {
   });
 }
 
+test('a report that defeats recursion settles the sample instead of hanging it', async ({
+  page,
+}) => {
+  // Free-form JSON means a page can publish something that every later step over
+  // it — stringify, clone, freeze — cannot walk. The sample must still finish: a
+  // send waits on it before the question goes out, so a pending promise would
+  // hang the classroom rather than degrade the answer.
+  const frame = page.frames().find((frame) => frame !== page.mainFrame())!;
+  await frame.evaluate(() => {
+    const nested = '['.repeat(10_000) + '1' + ']'.repeat(10_000);
+    const raw = `{"summary":"deep","state":${nested}}`;
+    document.querySelector('script[data-maic-observation]')!.textContent = raw;
+    return new TextEncoder().encode(raw).length;
+  });
+  const settled = await page.evaluate(
+    `Promise.race([
+       session.capture(),
+       new Promise((resolve) => setTimeout(() => resolve('HUNG'), 4000)),
+     ])`,
+  );
+  expect(settled).not.toBe('HUNG');
+  expect(settled).toMatchObject({ status: 'unavailable' });
+});
+
 // Execute the publication example that is actually included in generation prompts.
 const publicationExample = readFileSync(
   'packages/@openmaic/generation/snippets/interactive-observation.md',
   'utf8',
 ).match(/```javascript\n(function publishState[\s\S]*?)```/)![1];
-for (const failure of ['cycle', 'bigint', 'oversize', 'undefined', 'schema'] as const) {
+for (const failure of ['cycle', 'bigint', 'oversize', 'undefined'] as const) {
   test(`prompt publication ${failure} never returns previously known state`, async ({ page }) => {
     const frame = page.frames().find((frame) => frame !== page.mainFrame())!;
     await frame.addScriptTag({ content: publicationExample });
@@ -214,7 +230,7 @@ for (const failure of ['cycle', 'bigint', 'oversize', 'undefined', 'schema'] as 
     }, observation);
     expect(await page.evaluate('session.capture()')).toMatchObject({
       status: 'available',
-      observation: { current: { graph: { objects: [{ facts: [{ value: 7 }] }] } } },
+      observation: { state: { value: 7 } },
     });
     const publication = await frame.evaluate(
       ({ observation, failure }) => {
@@ -223,7 +239,7 @@ for (const failure of ['cycle', 'bigint', 'oversize', 'undefined', 'schema'] as 
         if (failure === 'cycle') invalid.loop = invalid;
         if (failure === 'bigint') invalid.value = BigInt(1);
         if (failure === 'oversize') invalid.value = 'x'.repeat(32769);
-        if (failure === 'schema') invalid.version = 999;
+
         let threw = false;
         try {
           publish(failure === 'undefined' ? undefined : invalid);
@@ -234,14 +250,28 @@ for (const failure of ['cycle', 'bigint', 'oversize', 'undefined', 'schema'] as 
       },
       { observation, failure },
     );
-    // The prompt helper handles publication failures; the actual collector owns schema validation.
+    // Failed publication must remove the previously published state.
     expect(publication).toEqual({
-      threw: failure !== 'schema',
-      outletPresent: failure === 'schema',
+      threw: true,
+      outletPresent: false,
     });
     expect(await page.evaluate('session.capture()')).toMatchObject({
       status: 'unavailable',
-      reason: failure === 'schema' ? 'invalid-data' : 'no-interface',
+      reason: 'no-interface',
+    });
+  });
+}
+
+for (const value of [[{ density: 1400 }], 'density is 1400', 1400, false, null]) {
+  test(`reader delivers JSON value ${JSON.stringify(value)} unchanged`, async ({ page }) => {
+    const frame = page.frames().find((frame) => frame !== page.mainFrame())!;
+    await frame.addScriptTag({ content: publicationExample });
+    await frame.evaluate((value) => {
+      (window as unknown as { publishState(value: unknown): void }).publishState(value);
+    }, value);
+    expect(await page.evaluate('session.capture()')).toMatchObject({
+      status: 'available',
+      observation: value,
     });
   });
 }

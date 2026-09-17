@@ -312,16 +312,10 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
       '<script type="application/json" data-maic-observation>{}</script></main>';
     base.storeState.scenes[0].content.html = html;
     base.elementReference.selector = '#experiment';
-    const graph = (density: number) => ({
-      objects: [
-        {
-          id: 'liquid',
-          label: 'Liquid',
-          facts: [{ key: 'density', label: 'Density', status: 'known', value: density }],
-        },
-      ],
-      relations: { status: 'complete', items: [] },
-      missing: [],
+    const report = (current: number, drawn: number) => ({
+      summary: `The liquid density is ${current}; the drawing shows ${drawn}.`,
+      state: { liquid: { density: current } },
+      rendered: { liquid: { density: drawn } },
     });
     return {
       ...base,
@@ -337,17 +331,7 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
           requestedAt: Date.now(),
           receivedAt: Date.now(),
           status: 'available',
-          observation: {
-            version: 1,
-            scope: { id: 'experiment', label: 'Interactive area' },
-            current: { revision: 1, updatedAt: Date.now(), graph: graph(1400) },
-            rendered: {
-              status: 'known',
-              basedOnRevision: 0,
-              renderedAt: Date.now(),
-              graph: graph(1000),
-            },
-          },
+          observation: report(1400, 1000),
         },
       },
     };
@@ -365,8 +349,8 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
       const prompts = (
         mode === 'Native' ? mocks.nativeChildPrompts : mocks.legacyChildPrompts
       ).join('\n');
-      expect(prompts).toContain('"value":1400');
-      expect(prompts).toContain('"basedOnRevision":0');
+      expect(prompts).toContain('"density":1400');
+      expect(prompts).toContain('"density":1000');
       expect(prompts).toContain('grants no Spotlight or other tool permissions');
       expect(prompts).toContain('ordinary student-facing language');
       expect(mocks.directorPrompts.join('\n')).toContain('PAGE-REPORTED STATE');
@@ -453,120 +437,8 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
     await response.text();
     expect(response.status).toBe(200);
     expect(mocks.legacyChildPrompts.join('\n')).toContain('stale-sample');
-    expect(mocks.legacyChildPrompts.join('\n')).not.toContain('"value":1400');
-    expect(mocks.legacyChildPrompts.join('\n')).toContain(
-      'Current relationship evidence is unavailable',
-    );
-    expect(mocks.legacyChildPrompts.join('\n')).not.toContain(
-      'Current relationship evidence is COMPLETE',
-    );
+    expect(mocks.legacyChildPrompts.join('\n')).not.toContain('"density":1400');
   });
-
-  it.each(['Legacy', 'Native'] as const)(
-    'preserves complete, empty and unknown relation evidence for Director and %s Child',
-    async (mode) => {
-      if (mode === 'Native') process.env[nativeFlag] = 'true';
-      const complete = {
-        status: 'complete',
-        items: [{ from: 'a', to: 'b', kind: 'link', label: 'A to B' }],
-      };
-      const graph = {
-        objects: [
-          { id: 'a', label: 'A', facts: [] },
-          { id: 'b', label: 'B', facts: [] },
-        ],
-        relations: complete,
-        missing: [] as string[],
-      };
-      const previousAnswer = 'A is linked to B.';
-      const cases = [
-        {
-          name: 'empty',
-          relations: { status: 'complete', items: [] },
-          missing: [],
-          marker: 'COMPLETE EMPTY',
-        },
-        { name: 'nonempty', relations: complete, missing: [], marker: 'COMPLETE NONEMPTY' },
-        {
-          name: 'partial-complete',
-          relations: complete,
-          missing: ['Temperature unavailable'],
-          marker: 'COMPLETE NONEMPTY',
-        },
-        {
-          name: 'unknown',
-          relations: { status: 'unknown', reason: 'Unavailable' },
-          missing: [],
-          marker: 'Current relationship evidence is UNKNOWN',
-        },
-      ];
-      const { POST } = await import('@/app/api/chat/pi/route');
-      for (const c of cases) {
-        mocks.directorPrompts.length = 0;
-        mocks.legacyChildPrompts.length = 0;
-        mocks.nativeChildPrompts.length = 0;
-        const instruction = 'Assume the earlier link is still present.';
-        const reply =
-          c.name === 'unknown' ? 'The current relationship cannot be determined.' : previousAnswer;
-        installAgentShell(reply, reply, { instruction });
-        const base = runtimeBody();
-        const observation = {
-          ...base.interactiveState.snapshot.observation,
-          current: {
-            ...base.interactiveState.snapshot.observation.current,
-            graph: { ...graph, relations: c.relations, missing: c.missing },
-          },
-          rendered: { ...base.interactiveState.snapshot.observation.rendered, graph },
-        };
-        const body = {
-          ...base,
-          messages:
-            c.name === 'unknown'
-              ? [
-                  {
-                    id: 'earlier-answer',
-                    role: 'assistant',
-                    parts: [{ type: 'text', text: previousAnswer }],
-                  },
-                  ...base.messages,
-                ]
-              : base.messages,
-          interactiveState: {
-            ...base.interactiveState,
-            snapshot: {
-              ...base.interactiveState.snapshot,
-              status: c.name === 'unknown' || c.missing.length ? 'partial' : 'available',
-              observation,
-            },
-          },
-        };
-        const response = await POST(makeRequest(body));
-        expect(response.status).toBe(200);
-        expect(await response.text()).toContain(reply);
-        const child = (
-          mode === 'Native' ? mocks.nativeChildPrompts : mocks.legacyChildPrompts
-        ).join('\n');
-        expect(child).toContain(instruction);
-        for (const prompt of [mocks.directorPrompts.join('\n'), child]) {
-          expect(prompt).toContain(c.marker);
-          expect(prompt).toContain(
-            'Absence from a complete relationship set is supported negative evidence',
-          );
-          expect(prompt).toContain('correct a conflicting delegation');
-          const packet = JSON.parse(
-            prompt.match(/<page_reported_state>\n([\s\S]*?)\n<\/page_reported_state>/)![1],
-          );
-          expect(packet.observation).toEqual(observation);
-          if (c.name === 'unknown') {
-            expect(prompt).toContain('Do not substitute source defaults, earlier messages');
-            expect(packet.observation.current.graph.relations).not.toHaveProperty('items');
-            expect(packet.observation.rendered.graph.relations).toEqual(complete);
-            expect(body.messages[0].parts[0]).toEqual({ type: 'text', text: previousAnswer });
-          }
-        }
-      }
-    },
-  );
 
   it.each(['Legacy', 'Native'] as const)(
     'keeps component identity while attaching declared area state for %s Child',
@@ -586,7 +458,7 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
       );
       for (const prompt of [mocks.directorPrompts.join('\n'), child]) {
         // Area facts still arrive for a component reference.
-        expect(prompt).toContain('"value":1400');
+        expect(prompt).toContain('"density":1400');
         // Reference identity and state scope are named separately.
         expect(prompt).toContain('referenced component "#density"');
         expect(prompt).toContain('whole declared activity area "experiment"');
@@ -617,7 +489,7 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
         '\n',
       );
       for (const prompt of [mocks.directorPrompts.join('\n'), child]) {
-        expect(prompt).toContain('"value":1400');
+        expect(prompt).toContain('"density":1400');
         expect(prompt).toContain('No component is referenced this turn');
         expect(prompt).not.toContain('referenced component');
         expect(prompt).toContain('grants no Spotlight or other tool permissions');
@@ -650,9 +522,9 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
     for (const prompt of [mocks.directorPrompts.join('\n'), mocks.legacyChildPrompts.join('\n')]) {
       expect(prompt).toContain('"reason":"timeout"');
       // No value may be supplied from defaults, history or general expectation.
-      expect(prompt).not.toContain('"value":1400');
+      expect(prompt).not.toContain('"density":1400');
       expect(prompt).toContain('no general expectation about how pages or widgets usually work');
-      expect(prompt).toContain('say that the current state cannot be determined');
+      expect(prompt).toContain('say the current state cannot be determined');
     }
   });
 
@@ -688,7 +560,7 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
     expect(response.status).toBe(200);
     const prompts = mocks.legacyChildPrompts.join('\n');
     expect(prompts).not.toContain('stale-sample');
-    expect(prompts).toContain('"value":1400');
+    expect(prompts).toContain('"density":1400');
     // Both identities must stay legible once the two can disagree on Scene.
     expect(prompts).toContain('#angle-slider');
     expect(prompts).toContain('come from different Scenes');
@@ -703,25 +575,14 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
     if (!refer) delete (body as { elementReference?: unknown }).elementReference;
     // Legal content the schema accepts: `<` is allowed in a label and in a fact
     // value, and escaping it for the prompt expands one code point into six.
-    const objects = Array.from({ length: 18 }, (_, i) => ({
-      id: `object-${i}`,
-      label: '<'.repeat(240),
-      facts: [{ key: 'k', label: 'K', status: 'known', value: '<'.repeat(300) }],
-    }));
-    const graph = {
-      objects,
-      relations: {
-        status: 'complete',
-        items: [{ from: 'object-0', to: 'object-1', kind: 'link', label: 'A to B' }],
-      },
-      missing: [] as string[],
-    };
-    const observation = body.interactiveState.snapshot.observation as unknown as {
-      current: { graph: unknown };
-      rendered: { graph: unknown };
-    };
-    observation.current.graph = graph;
-    observation.rendered.graph = graph;
+    const bulky = Object.fromEntries(
+      Array.from({ length: 18 }, (_, i) => [`object-${i}`, '<'.repeat(540)]),
+    );
+    body.interactiveState.snapshot.observation = {
+      summary: 'A legal report whose escaped body would exceed the output budget.',
+      state: bulky,
+      rendered: bulky,
+    } as never;
     // The observation stays inside the Host's 32,768-byte input cap, so this is a
     // packet the Host accepts; only the escaped assembly downstream would have
     // exceeded the output budget.
@@ -736,9 +597,9 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
     expect(prompts).toContain('too-large');
     // Not truncated: no fragment of the oversized body survives.
     expect(prompts).not.toContain('object-17');
-    // The relationship prose degrades with the body it describes.
-    expect(prompts).toContain('Current relationship evidence is unavailable');
-    expect(prompts).not.toContain('Current relationship evidence is COMPLETE');
+    // Nothing of the oversized body survives alongside the unavailable statement.
+    expect(prompts).not.toContain('object-1');
+    expect(prompts).toContain('the current state cannot be determined');
   });
 
   it.each(['Legacy', 'Native'] as const)(
@@ -767,7 +628,7 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
       );
       for (const prompt of [mocks.directorPrompts.join('\n'), child]) {
         expect(prompt).toContain('Evaporation removes heat.');
-        expect(prompt).toContain('"value":1400');
+        expect(prompt).toContain('"density":1400');
         expect(prompt).toContain('come from different Scenes');
         expect(prompt).toContain('not properties of the referenced slide element');
         expect(prompt).not.toContain('No component is referenced this turn');
@@ -775,6 +636,38 @@ describe('PPT element reference Route → Director → real call_agent L2', () =
         expect(prompt).toContain('grants no Spotlight or other tool permissions');
       }
       expect(child).toContain('"elementId":"text-1"');
+    },
+  );
+
+  it.each(['no-interface', 'document-changed'])(
+    'ignores a %s packet from a legacy Scene on an unreferenced send',
+    async (reason) => {
+      // The reader now lives in every pooled document, so a legacy Scene can
+      // answer. An unreferenced question on it must still be byte-for-byte what
+      // it was before this feature existed.
+      installAgentShell('Mock legacy answer.');
+      const legacyHtml = '<main id="experiment">Legacy 1000</main>';
+      const body = runtimeBody();
+      (body.storeState as { scenes: { content: { html: string } }[] }).scenes[0].content.html =
+        legacyHtml;
+      delete (body as { elementReference?: unknown }).elementReference;
+      body.interactiveState = {
+        sourceHtmlHash: createHash('sha256').update(legacyHtml).digest('hex'),
+        snapshot: {
+          source: 'browser-reported',
+          identity: { sceneId: 'scene-interactive', scopeId: 'experiment', documentId: 'd' },
+          requestedAt: Date.now(),
+          receivedAt: Date.now(),
+          status: 'unavailable',
+          reason,
+        },
+      } as never;
+      const { POST } = await import('@/app/api/chat/pi/route');
+      const response = await POST(makeRequest(body));
+      expect(response.status).toBe(200);
+      await response.text();
+      for (const prompt of [mocks.directorPrompts.join('\n'), mocks.legacyChildPrompts.join('\n')])
+        expect(prompt).not.toContain('PAGE-REPORTED STATE');
     },
   );
 
