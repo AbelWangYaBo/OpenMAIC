@@ -187,3 +187,28 @@ it('resolves picture fills through chart-local relationships and reads percent f
   expect(el.importedStyle?.series[0].pointImages?.['1']).toBe('data:image/png;base64,AQID');
   expect(el.importedStyle?.valueAxis?.numberFormat).toBe('0%');
 });
+
+it.each([
+  ['', 'General', 'General'],
+  ['sourceLinked="1"', 'General', 'General'],
+  ['sourceLinked="true"', '0%', '0%'],
+  ['sourceLinked="0"', 'General', '0%'],
+  ['sourceLinked="false"', 'General', '0%'],
+  ['sourceLinked="1"', '', '0%'],
+])('resolves axis source format (%s, %s)', (linked, cached, expected) => {
+  const xml = `<c:chartSpace ${NS}><c:chart><c:plotArea>
+    <c:barChart><c:ser><c:val><c:numRef><c:numCache>
+      ${cached ? `<c:formatCode>${cached}</c:formatCode>` : ''}
+      <c:ptCount val="1"/><c:pt idx="0"><c:v>0.6</c:v></c:pt>
+    </c:numCache></c:numRef></c:val></c:ser></c:barChart>
+    <c:valAx><c:numFmt formatCode="0%" ${linked}/></c:valAx>
+  </c:plotArea></c:chart></c:chartSpace>`;
+  const ctx = minimalCtx();
+  ctx.presentation = {
+    ...ctx.presentation,
+    charts: new Map([['ppt/charts/chart1.xml', parseXml(xml)]]),
+  };
+  const el = chartToElement(chartNode(), ctx, 0);
+  if (!('importedStyle' in el)) throw new Error('Expected bar chart style');
+  expect(el.importedStyle?.valueAxis?.numberFormat).toBe(expected);
+});

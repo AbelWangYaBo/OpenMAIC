@@ -289,7 +289,11 @@ function chartBool(node: SafeXmlNode): boolean | undefined {
   if (!node.exists()) return undefined;
   return !['0', 'false'].includes(node.attr('val') ?? '1');
 }
-function chartAxis(node: SafeXmlNode, ctx: RenderContext): ImportedChartAxis | undefined {
+function chartAxis(
+  node: SafeXmlNode,
+  ctx: RenderContext,
+  sourceFormat?: string,
+): ImportedChartAxis | undefined {
   if (!node.exists()) return undefined;
   const label = node.child('txPr').child('p').child('pPr').child('defRPr');
   const line = node.child('spPr').child('ln');
@@ -298,6 +302,10 @@ function chartAxis(node: SafeXmlNode, ctx: RenderContext): ImportedChartAxis | u
   const fill = line.child('solidFill');
   const labelFill = label.child('solidFill');
   const deleted = chartBool(node.child('delete'));
+  const numFmt = node.child('numFmt');
+  // sourceLinked defaults to true. Cached series formats describe the linked
+  // data; preserve the axis format when that information is unavailable.
+  const linked = !['0', 'false'].includes(numFmt.attr('sourceLinked') ?? '1');
   return {
     show: deleted === undefined ? undefined : !deleted,
     gridlines: grid.exists(),
@@ -313,7 +321,7 @@ function chartAxis(node: SafeXmlNode, ctx: RenderContext): ImportedChartAxis | u
     min: node.child('scaling').child('min').numAttr('val'),
     max: node.child('scaling').child('max').numAttr('val'),
     majorUnit: node.child('majorUnit').numAttr('val'),
-    numberFormat: node.child('numFmt').attr('formatCode'),
+    numberFormat: linked ? (sourceFormat ?? numFmt.attr('formatCode')) : numFmt.attr('formatCode'),
   };
 }
 function chartPicture(
@@ -346,6 +354,19 @@ function barStyle(
     if (chartBool(node.child('delete')) === true) return false;
     return chartBool(node.child('showVal'));
   };
+  const sourceFormats = chart
+    .children('ser')
+    .map((ser) =>
+      ser.child('val').child('numRef').child('numCache').child('formatCode').text().trim(),
+    );
+  // A shared axis with mixed/missing source formats has no unambiguous cache
+  // format. Keep its saved format instead of guessing from the first series.
+  const sourceFormat =
+    sourceFormats.length > 0 &&
+    sourceFormats[0] &&
+    sourceFormats.every((format) => format === sourceFormats[0])
+      ? sourceFormats[0]
+      : undefined;
   const style: ImportedChartStyle = {
     series: chart.children('ser').map((ser) => {
       const pointFills: Record<string, ChartFill> = {};
@@ -365,7 +386,7 @@ function barStyle(
       };
     }),
     categoryAxis: chartAxis(plot.child('catAx'), ctx),
-    valueAxis: chartAxis(plot.child('valAx'), ctx),
+    valueAxis: chartAxis(plot.child('valAx'), ctx, sourceFormat),
     gapWidth: chart.child('gapWidth').numAttr('val'),
   };
   const layout = plot.child('layout').child('manualLayout');
