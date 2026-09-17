@@ -1,12 +1,40 @@
 import { expect, it } from 'vitest';
 import { getChartOption } from '../../../src/elements/chart/chartOption';
+// The assertions below exercise the concrete bar option shape returned here.
+interface TestedBarOption {
+  series: Array<{
+    type: string;
+    label: { show: boolean };
+    data: Array<number | { itemStyle: { color: unknown }; symbol: string }>;
+    barCategoryGap: string;
+    symbolSize: string[];
+  }>;
+  xAxis: {
+    min: number;
+    max: number;
+    splitLine: { show: boolean };
+    axisLabel: { fontWeight: string };
+  };
+  yAxis: {
+    show: boolean;
+    interval: number;
+    type: string;
+    max: (extent: { min?: number; max: number }) => number;
+    axisLabel: { formatter: (value: number) => string };
+  };
+  grid: { left: string };
+}
+function point(value: TestedBarOption['series'][number]['data'][number]) {
+  if (typeof value === 'number') throw new Error('Expected a styled chart point');
+  return value;
+}
 const base = {
   type: 'bar' as const,
   data: { labels: ['A', 'B'], legends: ['S'], series: [[0.45, 0.6]] },
   themeColors: ['#ff8800'],
 };
 it('keeps legacy chart defaults without imported style', () => {
-  const o = getChartOption(base) as any;
+  const o = getChartOption(base) as unknown as TestedBarOption;
   expect(o.series[0].label.show).toBe(true);
   expect(o.series[0].data).toEqual([0.45, 0.6]);
 });
@@ -31,10 +59,10 @@ it('honors imported bar point fills, hidden labels and axis configuration', () =
       gapWidth: 150,
       plotArea: { x: 0.02, y: 0.05, w: 0.96, h: 0.8 },
     },
-  }) as any;
+  }) as unknown as TestedBarOption;
   expect(o.series[0].label.show).toBe(false);
-  expect(o.series[0].data[1].itemStyle.color).toEqual(gradient);
-  expect(o.series[0].data[0].itemStyle.color).toBe('#ff0000');
+  expect(point(o.series[0].data[1]).itemStyle.color).toEqual(gradient);
+  expect(point(o.series[0].data[0]).itemStyle.color).toBe('#ff0000');
   expect(o.series[0].barCategoryGap).toBe('60%');
   expect(o.yAxis.show).toBe(false);
   expect(o.yAxis.interval).toBe(1);
@@ -49,7 +77,7 @@ it('preserves explicit bounds and applies styles to horizontal bars', () => {
     ...base,
     type: 'column',
     importedStyle: { series: [], valueAxis: { min: -2, max: 3, majorUnit: 1 } },
-  }) as any;
+  }) as unknown as TestedBarOption;
   expect(o.xAxis.min).toBe(-2);
   expect(o.xAxis.max).toBe(3);
   expect(o.yAxis.type).toBe('category');
@@ -62,11 +90,15 @@ it('renders stretched point images and percentage axis without value labels', ()
       gapWidth: 0,
       valueAxis: { numberFormat: '0%' },
     },
-  }) as any;
+  }) as unknown as TestedBarOption;
   expect(o.series[0].type).toBe('pictorialBar');
-  expect(decodeURIComponent(o.series[0].data[0].symbol)).toContain('preserveAspectRatio="none"');
-  expect(decodeURIComponent(o.series[0].data[0].symbol)).toContain('data:image/png;base64,AA==');
-  expect(o.series[0].data[1].symbol).toBe('rect');
+  expect(decodeURIComponent(point(o.series[0].data[0]).symbol)).toContain(
+    'preserveAspectRatio="none"',
+  );
+  expect(decodeURIComponent(point(o.series[0].data[0]).symbol)).toContain(
+    'data:image/png;base64,AA==',
+  );
+  expect(point(o.series[0].data[1]).symbol).toBe('rect');
   expect(o.series[0].symbolSize).toEqual(['100%', '100%']);
   expect(o.yAxis.axisLabel.formatter(0.6)).toBe('60%');
   expect(o.yAxis.max({ max: 0.6, min: 0 })).toBeCloseTo(0.7);

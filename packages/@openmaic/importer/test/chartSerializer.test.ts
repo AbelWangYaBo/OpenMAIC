@@ -106,17 +106,23 @@ it('preserves explicit bar style and series label deletion over chart defaults',
     <c:valAx><c:delete val="1"/><c:majorUnit val="1"/></c:valAx>
   </c:plotArea></c:chart></c:chartSpace>`;
   const ctx = minimalCtx();
-  ctx.presentation = { charts: new Map([['ppt/charts/chart1.xml', parseXml(xml)]]) } as any;
-  const el = chartToElement(chartNode(), ctx, 0) as any;
-  expect(el.importedStyle.series[0].showValue).toBe(false);
-  expect(el.importedStyle.series[0].pointFills['2'].colorStops).toEqual([
-    { offset: 0, color: '#FF8800' },
-    { offset: 1, color: '#FFFFFF' },
-  ]);
-  expect(el.importedStyle.valueAxis.show).toBe(false);
-  expect(el.importedStyle.valueAxis.majorUnit).toBe(1);
-  expect(el.importedStyle.categoryAxis.labelFontSize).toBe(16);
-  expect(el.importedStyle.plotArea.w).toBe(0.96);
+  ctx.presentation = {
+    ...ctx.presentation,
+    charts: new Map([['ppt/charts/chart1.xml', parseXml(xml)]]),
+  };
+  const el = chartToElement(chartNode(), ctx, 0);
+  if (!('importedStyle' in el)) throw new Error('Expected imported chart style');
+  expect(el.importedStyle?.series[0].showValue).toBe(false);
+  expect(el.importedStyle?.series[0].pointFills?.['2']).toMatchObject({
+    colorStops: [
+      { offset: 0, color: '#FF8800' },
+      { offset: 1, color: '#FFFFFF' },
+    ],
+  });
+  expect(el.importedStyle?.valueAxis?.show).toBe(false);
+  expect(el.importedStyle?.valueAxis?.majorUnit).toBe(1);
+  expect(el.importedStyle?.categoryAxis?.labelFontSize).toBe(16);
+  expect(el.importedStyle?.plotArea?.w).toBe(0.96);
 });
 
 it('carries chart formatting through the slide adapter and scales axis text', async () => {
@@ -153,7 +159,7 @@ it('carries chart formatting through the slide adapter and scales axis text', as
           ],
         },
       ],
-    } as any,
+    } as unknown as Parameters<typeof transformParsedToSlides>[0],
     createMockImportContext({ ratio: 2 }),
   );
   const chart = slides[0].elements[0];
@@ -166,6 +172,7 @@ it('resolves picture fills through chart-local relationships and reads percent f
   const xml = `<c:chartSpace ${NS} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><c:chart><c:plotArea><c:barChart><c:ser><c:dPt><c:idx val="1"/><c:spPr><a:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></a:blipFill></c:spPr></c:dPt></c:ser></c:barChart><c:valAx><c:numFmt formatCode="0%"/></c:valAx></c:plotArea></c:chart></c:chartSpace>`;
   const ctx = minimalCtx();
   ctx.presentation = {
+    ...ctx.presentation,
     charts: new Map([['ppt/charts/chart1.xml', parseXml(xml)]]),
     chartRels: new Map([
       [
@@ -174,8 +181,9 @@ it('resolves picture fills through chart-local relationships and reads percent f
       ],
     ]),
     media: new Map([['ppt/media/test.png', new Uint8Array([1, 2, 3])]]),
-  } as any;
-  const el = chartToElement(chartNode(), ctx, 0) as any;
-  expect(el.importedStyle.series[0].pointImages['1']).toBe('data:image/png;base64,AQID');
-  expect(el.importedStyle.valueAxis.numberFormat).toBe('0%');
+  };
+  const el = chartToElement(chartNode(), ctx, 0);
+  if (!('importedStyle' in el)) throw new Error('Expected imported chart style');
+  expect(el.importedStyle?.series[0].pointImages?.['1']).toBe('data:image/png;base64,AQID');
+  expect(el.importedStyle?.valueAxis?.numberFormat).toBe('0%');
 });
