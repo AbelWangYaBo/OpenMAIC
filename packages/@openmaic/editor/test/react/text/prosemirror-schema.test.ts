@@ -8,6 +8,15 @@ import {
 } from '../../../src/react/text/prosemirror/document';
 
 describe('renderer ProseMirror schema', () => {
+  it('preserves font-measured leading spaces through editor round trips', () => {
+    const html =
+      '<p><span style="font-family: PingFang SC;font-size:24pt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;苗圃维护小组</span></p>';
+    const doc = createTextDocument(html);
+    expect(doc.textContent).toBe('\u00a0'.repeat(10) + '苗圃维护小组');
+    const output = serializeTextDocument(doc);
+    expect(createTextDocument(output).textContent).toBe(doc.textContent);
+  });
+
   it('preserves imported link styles and compact trailing punctuation', () => {
     const output = serializeTextDocument(
       createTextDocument(

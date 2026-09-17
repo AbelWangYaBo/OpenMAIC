@@ -474,6 +474,7 @@ interface MergedRunStyle {
   color?: string;
   fontFamily?: string;
   hlinkClick?: string;
+  hyperlinkColor?: 'tx' | 'hlink';
   /** Character spacing (tracking) in points — from a:spc @val (hundredths of pt). */
   letterSpacingPt?: number;
   /** Kerning: minimum font size (pt) for kerning; 0 = always kern. */
@@ -604,8 +605,27 @@ function mergeRunProps(target: MergedRunStyle, rPr: SafeXmlNode, ctx: RenderCont
   // Hyperlink
   const hlinkClick = rPr.child('hlinkClick');
   if (hlinkClick.exists()) {
+    // Office's hyperlink color override belongs to the hyperlink, not rPr fill.
+    target.hyperlinkColor = 'hlink';
+    for (const ext of hlinkClick.child('extLst').children('ext')) {
+      const color = ext.child('hlinkClr');
+      if (
+        color.rawElement?.namespaceURI !==
+        'http://schemas.microsoft.com/office/drawing/2018/hyperlinkcolor'
+      )
+        continue;
+      const value = color.attr('val');
+      if (value === 'tx' || value === 'hlink') target.hyperlinkColor = value;
+    }
     // The actual URL is in the slide rels, referenced by r:id
-    const rId = hlinkClick.attr('id') ?? hlinkClick.attr('r:id');
+    // Relationship prefixes are arbitrary (e.g. ns1:id); resolve by namespace.
+    const rId =
+      hlinkClick.rawElement?.getAttributeNS(
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+        'id',
+      ) ||
+      hlinkClick.attr('id') ||
+      hlinkClick.attr('r:id');
     if (rId) {
       const rel = ctx.slide.rels.get(rId);
       if (rel && rel.targetMode === 'External' && isAllowedExternalUrl(rel.target)) {
@@ -814,21 +834,15 @@ function formatRunTextForHtml(raw: string): string {
   if (raw.includes('\t')) {
     return escapeHtml(raw);
   }
-  // PowerPoint \u91cc\u4f5c\u8005\u5e38\u7528 N \u4e2a ASCII \u7a7a\u683c\u505a\u89c6\u89c9\u7f29\u8fdb\u2014\u2014\u5728 \u7b49\u7ebf/CJK \u5b57\u4f53\u91cc
-  // ASCII space \u662f\u56fa\u5b9a\u7684 half-width\uff080.5em\uff09\uff0c\u4f46\u6d4f\u89c8\u5668\u66ff\u6362\u6210 SourceHanSans
-  // \u540e\u7a7a\u683c\u5bbd\u5ea6\u504f\u5bbd\uff0c\u5bfc\u81f4 "\u6388\u8bfe\u56e2\u961f\uff1a" \u4e0b\u9762\u7528\u7a7a\u683c\u5bf9\u9f50\u7684\u51e0\u884c\u88ab\u63a8\u5230\u6bd4\u6e90 PPT
-  // \u6392\u7248\u610f\u56fe\u66f4\u9760\u53f3\u7684\u4f4d\u7f6e\u3002\u628a\u9996\u6bb5 >=2 \u4e2a\u8fde\u7eed\u7a7a\u683c\u6298\u7b97\u6210\u7b49\u5bbd inline-block\uff0c
-  // \u7f29\u8fdb\u5c31\u548c\u5b57\u4f53\u5ea6\u91cf\u89e3\u8026\uff0c\u5339\u914d CJK half-width \u4e60\u60ef\u3002
+  // Preserve the actual space glyphs. Their advance depends on the resolved
+  // font; a fixed em width or a label-based indent changes authored layout.
   let leadingPrefix = '';
   let remainder = raw;
   const leadingMatch = remainder.match(/^( {2,})/);
   if (leadingMatch) {
-    const count = leadingMatch[1].length;
-    remainder = remainder.slice(count);
-    // 0.25em/空格：自托管思源宋体/黑体实测 ASCII space advance ≈0.256em。早期用
-    // 0.5em 是 fonts.css 未 import 时空格落到偏宽系统 fallback 的补偿；字体注册修复
-    // 后 0.5em 反而把「图标+\t+空格+标题」窄框标题多撑约 1em 触发误换行（slide 6）。
-    leadingPrefix = `<span style="display:inline-block;width:${(count * 0.25).toFixed(2)}em"></span>`;
+    remainder = remainder.slice(leadingMatch[1].length);
+    // NBSP preserves leading whitespace through HTML and editor serialization.
+    leadingPrefix = '\u00a0'.repeat(leadingMatch[1].length);
   }
   let t = escapeHtml(remainder);
   if (/ {2}/.test(remainder)) {
@@ -1045,71 +1059,6 @@ function autoFitLineHeight(
   return ratio >= 1.05 && ratio <= 1.3 ? `${pitch.toFixed(4)}px` : undefined;
 }
 
-/**
- * WPS displays some CJK label lists with continuation spaces aligned to the
- * label's full-width character column. This is a layout inference, not a font
- * space metric: require repeated, unambiguous alignment and enough frame room.
- * In particular, do not widen arbitrary leading spaces or tab-based titles.
- */
-function labelContinuationIndent(
-  textBody: TextBody,
-  placeholder: PlaceholderInfo | undefined,
-  ctx: RenderContext,
-  frameWidthPx: number | undefined,
-): { spaces: number; widthPx: number } | undefined {
-  if (!frameWidthPx || textBody.paragraphs.length < 3) return;
-  const direction = textBody.bodyProperties?.attr('vert');
-  if (direction && direction !== 'horz') return;
-  if ((textBody.bodyProperties?.numAttr('numCol') ?? 1) !== 1) return;
-  const texts = textBody.paragraphs.map((p) => p.runs.map((r) => r.text ?? '').join(''));
-  const label = texts[0].match(/^([\u3400-\u9fff]{1,12}：)[\u3400-\u9fff]+$/)?.[1];
-  if (!label) return;
-  const spaces = label.length * 2;
-  const continuation = new RegExp(`^ {${spaces}}[\\u3400-\\u9fff]+$`);
-  if (!texts.slice(1).every((text) => continuation.test(text))) return;
-
-  let typography: string | undefined;
-  let fontSizePt = 12;
-  const category = getPlaceholderCategory(placeholder);
-  for (const paragraph of textBody.paragraphs) {
-    const merged = buildMergedParagraphStyle(textBody, paragraph, category, placeholder, ctx);
-    if (
-      (merged.align && merged.align !== 'l') ||
-      merged.marginLeft ||
-      merged.textIndent ||
-      merged.bulletChar ||
-      merged.bulletAutoNum ||
-      merged.tabStopsPx?.length
-    )
-      return;
-    for (const run of paragraph.runs) {
-      if (run.ommlXml || (run as { fldType?: string }).fldType) return;
-      const style: MergedRunStyle = {};
-      for (const props of merged.defRPrs ?? []) mergeRunProps(style, props, ctx);
-      if (run.properties) mergeRunProps(style, run.properties, ctx);
-      if (style.letterSpacingPt || style.baseline) return;
-      fontSizePt = style.fontSize ?? 12;
-      const key = JSON.stringify([
-        fontSizePt,
-        style.fontFamily ?? '',
-        !!style.bold,
-        !!style.italic,
-      ]);
-      if (typography !== undefined && typography !== key) return;
-      typography = key;
-    }
-  }
-  const emPx = (fontSizePt * 4) / 3;
-  const bodyPr = textBody.bodyProperties;
-  const insetPx = emuToPx((bodyPr?.numAttr('lIns') ?? 91440) + (bodyPr?.numAttr('rIns') ?? 91440));
-  const longestLine = Math.max(
-    texts[0].length,
-    ...texts.slice(1).map((t) => label.length + t.length - spaces),
-  );
-  if (longestLine * emPx > frameWidthPx - insetPx) return;
-  return { spaces, widthPx: label.length * emPx };
-}
-
 /** Render the text body as HTML, preserving inherited paragraph and run styles. */
 export function renderTextBody(
   textBody: TextBody | undefined,
@@ -1137,9 +1086,6 @@ export function renderTextBody(
   const savedAutoFitLineHeight = autoFitLineHeight(textBody, paragraphStyles, options);
   let html = '';
   const textWarp = getSupportedTextWarp(textBody);
-  const labelIndent = options?.cellMargins
-    ? undefined
-    : labelContinuationIndent(textBody, placeholder, ctx, options?.frameWidthPx);
 
   if (textWarp) {
     html = renderTextWarp(textBody, category, placeholder, ctx, options, textWarp);
@@ -1250,10 +1196,6 @@ export function renderTextBody(
         }
       }
 
-      if (labelIndent && !isFirstPara) {
-        leadingStripChars = labelIndent.spaces;
-      }
-
       let finalMarginLeftPx: number | undefined;
       if (effectiveMarginLeft !== undefined || leadingFoldPx > 0 || leadingFoldEm > 0) {
         if (leadingFoldPx > 0 || leadingFoldEm > 0) {
@@ -1275,10 +1217,6 @@ export function renderTextBody(
           finalMarginLeftPx = effectiveMarginLeft;
           paraCssParts.push(`margin-left: ${effectiveMarginLeft}px`);
         }
-      }
-      // Keep this in pt so the canvas import scales it together with the text.
-      if (labelIndent && !isFirstPara) {
-        paraCssParts.push(`margin-left: ${(labelIndent.widthPx * 3) / 4}pt`);
       }
       // text-indent: when a leading tab folded but its stop is at/behind marL
       // (leadingFoldPx === 0), the tab still nudges the FIRST line forward to the
@@ -1939,15 +1877,16 @@ function runStylesToCssString(
   }
 
   const decorations: string[] = [];
-  // Hyperlinks are underlined by default in PPTX. Emit that explicitly: host
-  // CSS resets may remove the browser's anchor decoration. Preserve u=none.
-  if (runStyle.underline ?? !!runStyle.hlinkClick) decorations.push('underline');
+  // Text hyperlinks have their own underline, independent of ordinary rPr u.
+  // Shape hyperlinks never enter this run-level styling path.
+  if (runStyle.hlinkClick || runStyle.underline) decorations.push('underline');
   if (runStyle.strikethrough) decorations.push('line-through');
   if (decorations.length > 0) {
     parts.push(`text-decoration: ${decorations.join(' ')}`);
   }
 
-  // Color priority: explicit run rPr > hlink theme color > cellTextColor (table style tcTxStyle) > fontRef (shape style) > inherited styles > black default
+  // Resolve the ordinary text fill first; the hyperlink color policy below
+  // can override it with the document theme color.
   // cellTextColor from table style overrides inherited cascade colors but yields to explicit run/paragraph solidFill/gradFill.
   // fontRefColor overrides inherited styles but yields to explicit run solidFill/gradFill.
   const hasExplicitRunColor =
@@ -1961,24 +1900,16 @@ function runStylesToCssString(
     effectiveColor = runStyle.color;
   }
 
-  // Hyperlink default color: when the run is a hyperlink and has no explicit
-  // solidFill on its own rPr, use the theme's hlink color.  This matches
-  // PowerPoint behaviour where hyperlink text defaults to the hlink scheme color.
-  const runFill = run.properties?.child('solidFill');
-  // WPS auto-styles visible web addresses carrying an unmodified tx1 fill.
-  // Limit this compatibility fallback to exact URL labels; preserve named
-  // navigation links, tx2, RGB, accent, transformed fills and gradients.
-  const scheme = runFill?.child('schemeClr');
-  const isPlainTextThemeColor =
-    scheme?.attr('val') === 'tx1' &&
-    scheme.allChildren().length === 0 &&
-    run.text === runStyle.hlinkClick &&
-    /^https?:\/\//i.test(run.text ?? '');
-  if (runStyle.hlinkClick && (!hasExplicitRunColor || isPlainTextThemeColor)) {
-    const hlinkHex = ctx.theme.colorScheme.get('hlink');
-    if (hlinkHex) {
-      effectiveColor = hlinkHex.startsWith('#') ? hlinkHex : `#${hlinkHex}`;
-    }
+  // Text hyperlinks use the theme color unless Office's hlinkClr explicitly
+  // selects the text fill. Visible URL text and named links follow the same rule.
+  const hyperlinkThemeColor =
+    runStyle.hlinkClick && runStyle.hyperlinkColor !== 'tx'
+      ? ctx.theme.colorScheme.get('hlink')
+      : undefined;
+  if (hyperlinkThemeColor) {
+    effectiveColor = hyperlinkThemeColor.startsWith('#')
+      ? hyperlinkThemeColor
+      : `#${hyperlinkThemeColor}`;
   }
 
   if (effectiveColor) {
@@ -1989,7 +1920,7 @@ function runStylesToCssString(
   }
 
   // Gradient text fill: use background-clip to paint text with gradient
-  if (runStyle.textGradientCss) {
+  if (runStyle.textGradientCss && !hyperlinkThemeColor) {
     parts.push(`background: ${runStyle.textGradientCss}`);
     parts.push('-webkit-background-clip: text');
     parts.push('background-clip: text');
