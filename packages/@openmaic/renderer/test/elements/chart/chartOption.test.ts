@@ -103,3 +103,20 @@ it('renders stretched point images and percentage axis without value labels', ()
   expect(o.yAxis.axisLabel.formatter(0.6)).toBe('60%');
   expect(o.yAxis.max({ max: 0.6, min: 0 })).toBeCloseTo(0.7);
 });
+
+it.each(['bar', 'column'] as const)(
+  'preserves default and explicit axis line visibility for %s',
+  (type) => {
+    for (const lineVisible of [undefined, true, false]) {
+      const o = getChartOption({
+        ...base,
+        type,
+        importedStyle: { series: [], valueAxis: { lineVisible } },
+      }) as unknown as Record<string, { axisLine: { show: boolean } }>;
+      expect(o[type === 'bar' ? 'yAxis' : 'xAxis'].axisLine.show).toBe(lineVisible ?? true);
+    }
+  },
+);
+it('tolerates persisted imported styles without a series array', () => {
+  expect(() => getChartOption({ ...base, importedStyle: {} as never })).not.toThrow();
+});

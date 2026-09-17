@@ -82,13 +82,14 @@ export const getChartOption = ({
   const legend = data.series.length > 1 ? { top: 'bottom' as const, textStyle } : undefined;
 
   if (type === 'bar' || type === 'column') {
+    const importedSeries = importedStyle?.series ?? [];
     const hasPicture =
-      !stack && importedStyle?.series.some((s) => Object.keys(s.pointImages ?? {}).length > 0);
+      !stack && importedSeries.some((s) => Object.keys(s.pointImages ?? {}).length > 0);
     const axisOptions = (style: ImportedChartAxis | undefined, category: boolean) => ({
       ...(style?.show !== undefined ? { show: style.show } : {}),
       axisLine: style
         ? {
-            show: style.lineVisible ?? category,
+            show: style.lineVisible ?? true,
             lineStyle: { color: style.lineColor ?? textColor ?? '#333333' },
           }
         : axisLine,
@@ -171,7 +172,7 @@ export const getChartOption = ({
       xAxis: type === 'bar' ? category : value,
       yAxis: type === 'bar' ? value : category,
       series: plotSeries.map((item, index) => {
-        const style = importedStyle?.series[index];
+        const style = importedSeries[index];
         // ECharts lays out bar and pictorialBar independently. Keep every
         // unstacked series in the same layout when any point uses a picture;
         // points without images retain a rectangular symbol.

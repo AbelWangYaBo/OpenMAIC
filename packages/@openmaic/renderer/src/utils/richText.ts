@@ -8,10 +8,3 @@ const HTML_MARKUP_PATTERN = /<\/?[a-z][^>]*>|<![^>]*>/i;
 export function preservesPlainTextLineBreaks(content: string): boolean {
   return !HTML_MARKUP_PATTERN.test(content);
 }
-
-/** Imported text containers (also preserved by the editor) own their insets. */
-export function hasTextFrameInsets(content: string): boolean {
-  const wrapper = content.match(/^\s*<div\b([^>]*)>/i);
-  const style = wrapper?.[1].match(/(?:^|\s)style\s*=\s*(["'])(.*?)\1/i)?.[2];
-  return !!style && /(?:^|;)\s*padding\s*:\s*[^;]+/i.test(style);
-}
