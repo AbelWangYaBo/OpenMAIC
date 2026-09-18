@@ -117,6 +117,33 @@ test('spurious reply from another window is ignored; no interface is explicit', 
   });
 });
 
+test('a legacy page with no scope reports no-interface; removing a declared scope reports scope-changed', async ({
+  page,
+}) => {
+  const frame = page.frames().find((f) => f.parentFrame())!;
+  await frame.locator('#experiment').evaluate((el) => el.remove());
+  expect(await page.evaluate('session.capture()')).toMatchObject({
+    status: 'unavailable',
+    reason: 'scope-changed',
+  });
+
+  await page.evaluate(patchBundle + ';window.IframeUtils=IframeUtils;');
+  await page.evaluate(async () => {
+    const w = window as unknown as TestWindow;
+    w.session.dispose();
+    const ready = new Promise<void>((resolve) => {
+      w.f.onload = () => resolve();
+    });
+    w.f.srcdoc = w.IframeUtils.patchHtmlForIframe('<main>Legacy activity</main>', w.identity);
+    await ready;
+    w.session = w.Bridge.createObservationSession(w.f, w.identity);
+  });
+  expect(await page.evaluate('session.capture()')).toMatchObject({
+    status: 'unavailable',
+    reason: 'no-interface',
+  });
+});
+
 test('actual iframe navigation invalidates an in-flight read without caller disposal', async ({
   page,
 }) => {

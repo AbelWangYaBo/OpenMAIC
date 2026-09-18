@@ -55,9 +55,12 @@ export function installObservationResponder(identity: ObservationIdentity): () =
       return;
     let raw: string | undefined;
     let reason: UnavailableReason | undefined;
-    if (
+    const currentRoots = document.querySelectorAll(`#${CSS.escape(identity.scopeId)}`);
+    // Legacy documents never declared a scope; a removed/replaced scope is different.
+    if (roots.length === 0 && currentRoots.length === 0) reason = 'no-interface';
+    else if (
       !root?.isConnected ||
-      document.querySelectorAll(`#${CSS.escape(identity.scopeId)}`).length !== 1 ||
+      currentRoots.length !== 1 ||
       document.getElementById(identity.scopeId) !== root
     )
       reason = 'scope-changed';
