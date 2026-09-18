@@ -263,6 +263,10 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+          # setup-node v5 enables package-manager caching whenever package.json
+          # declares `packageManager`, which requires pnpm on PATH. This job only
+          # publishes prebuilt tarballs with npm and never installs pnpm.
+          package-manager-cache: false
 
       - name: Download validated package tarballs
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -436,6 +440,8 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
+          # See the publish job: no pnpm here, so disable the automatic cache.
+          package-manager-cache: false
 
       - name: Write missing release markers
         env:
