@@ -1,9 +1,12 @@
-import { mkdtempSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createResourceHandler } from '../src/resource-owner.mjs';
+import { assertCanonicalProjectRoot } from '../src/resource-settings.mjs';
 const roots: string[] = [];
+beforeEach(() => vi.spyOn(console, 'error').mockImplementation(() => {}));
+afterEach(() => vi.restoreAllMocks());
 afterEach(() => roots.splice(0).forEach((path) => rmSync(path, { recursive: true, force: true })));
 class BudgetedRenderError extends Error {
   constructor(readonly settlement: object) {
@@ -143,3 +146,59 @@ it('forwards cancellation to the active original Producer and preserves failed s
     }),
   );
 });
+
+it('fails closed for an invoked Producer error without inventing settlement evidence', async () => {
+  const { handle, request, render, send } = handler();
+  render.mockRejectedValueOnce(new TypeError('unexpected producer error'));
+  await handle(request);
+  expect(send).not.toHaveBeenCalledWith({ event: 'closed' });
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledWith(
+    expect.objectContaining({
+      event: 'result',
+      result: expect.objectContaining({
+        status: 'failed',
+        resources: expect.objectContaining({
+          cleanupVerified: false,
+          reservationReturned: false,
+          admissionClosed: true,
+          details: { unexpectedFailure: true },
+        }),
+      }),
+    }),
+  );
+});
+
+it('rejects an actual symlinked ancestor before accepting the configured project root', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'resource-root-')));
+  roots.push(root);
+  mkdirSync(join(root, 'real/projects'), { recursive: true });
+  symlinkSync(join(root, 'real'), join(root, 'alias'));
+  expect(() => assertCanonicalProjectRoot(join(root, 'alias/projects'))).toThrow('canonical');
+  expect(() => assertCanonicalProjectRoot(join(root, 'real/projects'))).not.toThrow();
+});
+
+it.each(['settled', 'unexpected'])(
+  'keeps %s internal errors out of normal IPC failure messages',
+  async (kind) => {
+    const { handle, request, render, send } = handler();
+    const error =
+      kind === 'settled'
+        ? new BudgetedRenderError({
+            published: false,
+            cleanupVerified: true,
+            reservationReturned: true,
+          })
+        : new Error();
+    error.message = 'guardian /sys/fs/cgroup/private-session diagnostics';
+    render.mockRejectedValueOnce(error);
+    await handle(request);
+    const result = send.mock.calls.find(([message]) => message.event === 'result')![0].result;
+    expect(result.failure).toEqual({
+      code: 'execution_failed',
+      message: 'Resource render failed; see service logs',
+    });
+    expect(result.failure.message).not.toContain('private-session');
+    expect(console.error).toHaveBeenCalledWith('Resource render failed:', error);
+  },
+);

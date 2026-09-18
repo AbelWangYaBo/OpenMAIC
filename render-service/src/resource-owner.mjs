@@ -2,6 +2,7 @@
 import { readFileSync, realpathSync, lstatSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { readResourceSettings } from './resource-settings.mjs';
 import { verifyResourcePackage } from '../scripts/resource-package.mjs';
 
 /** The same request handler used by S; native ownership stays in Producer. */
@@ -77,6 +78,7 @@ export function createResourceHandler({
         },
       };
     } catch (error) {
+      console.error('Resource render failed:', error);
       const details =
         error instanceof BudgetedRenderError
           ? error.settlement
@@ -94,8 +96,11 @@ export function createResourceHandler({
         status: cancelled ? 'cancelled' : 'failed',
         failure: {
           code: cancelled ? 'cancelled' : expired ? 'deadline_exceeded' : 'execution_failed',
-          message:
-            expired && !cancelled ? 'Render exceeded the deadline' : String(error).slice(-8192),
+          message: cancelled
+            ? 'Render cancelled'
+            : expired
+              ? 'Render exceeded the deadline'
+              : 'Resource render failed; see service logs',
         },
         resources: {
           published: details.published === true,
@@ -108,7 +113,6 @@ export function createResourceHandler({
       };
     }
     active = undefined;
-    if (!result.resources.reservationReturned) send({ event: 'closed' });
     send({ event: 'result', id: message.id, result });
   };
 }
@@ -116,7 +120,7 @@ export function createResourceHandler({
 async function main() {
   if (process.platform !== 'linux' || process.getuid() !== 0 || !process.send)
     throw new Error('Resource owner requires Linux root and inherited IPC');
-  const settings = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+  const settings = readResourceSettings(process.argv[2]);
   const packageRoot = verifyResourcePackage(settings.packageRoot);
   const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
   if (manifest.name !== '@hyperframes/producer' || manifest.version !== '0.8.37')

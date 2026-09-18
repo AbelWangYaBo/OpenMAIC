@@ -74,6 +74,7 @@ export class InMemoryJobStore implements JobStore {
     for (const [id, job] of this.jobs) {
       if (
         isTerminal(job.status) &&
+        job.resources?.cleanupVerified !== false &&
         job.resources?.reservationReturned !== false &&
         now - job.updatedAtMs > this.ttlMs
       ) {

@@ -123,3 +123,47 @@ it('preserves the quarantine record across the job TTL', async () => {
   expect(await store.get('retained')).not.toBeNull();
   expect(reap).not.toHaveBeenCalled();
 });
+
+it.each([
+  [false, false, true],
+  [false, true, true],
+  [true, false, true],
+  [true, true, false],
+] as const)(
+  'TTL retention: cleanup=%s returned=%s retains=%s',
+  async (cleanupVerified, reservationReturned, keep) => {
+    vi.useFakeTimers();
+    const reap = vi.fn();
+    const store = new InMemoryJobStore(100, reap);
+    await store.create({
+      id: 'settled',
+      status: 'failed',
+      progress: 0,
+      currentStage: 'failed',
+      createdAtMs: Date.now(),
+      updatedAtMs: Date.now(),
+      projectDir: '/work/render',
+      resources: { ...retained, cleanupVerified, reservationReturned },
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect((await store.get('settled')) !== null).toBe(keep);
+    expect(reap).toHaveBeenCalledTimes(keep ? 0 : 1);
+  },
+);
+it('keeps default-executor TTL cleanup when no resource settlement exists', async () => {
+  vi.useFakeTimers();
+  const reap = vi.fn();
+  const store = new InMemoryJobStore(100, reap);
+  await store.create({
+    id: 'legacy',
+    status: 'failed',
+    progress: 0,
+    currentStage: 'failed',
+    createdAtMs: Date.now(),
+    updatedAtMs: Date.now(),
+    projectDir: '/work/render',
+  });
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(await store.get('legacy')).toBeNull();
+  expect(reap).toHaveBeenCalledOnce();
+});

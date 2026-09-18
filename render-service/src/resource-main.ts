@@ -1,17 +1,19 @@
 /** Opt-in bootstrap: start dedicated S, then run the existing HTTP service unprivileged. */
 import { fork } from 'node:child_process';
-import { readFileSync, realpathSync, lstatSync } from 'node:fs';
+import { lstatSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ResourceClient } from './resource-client.js';
 import { config } from './config.js';
+import { readResourceSettings, assertCanonicalProjectRoot } from './resource-settings.mjs';
 
 if (process.platform !== 'linux' || process.getuid?.() !== 0)
   throw new Error('Resource bootstrap requires Linux root');
 if (config.chunkExecutionEnabled)
   throw new Error('Budgeted rendering does not support chunk execution');
-const settingsPath = realpathSync(process.argv[2] ?? '');
-const value: unknown = JSON.parse(readFileSync(settingsPath, 'utf8'));
+assertCanonicalProjectRoot(config.tmpDir);
+const settingsPath = resolve(process.argv[2] ?? '');
+const value = readResourceSettings(settingsPath);
 if (
   typeof value !== 'object' ||
   value === null ||
@@ -19,7 +21,7 @@ if (
   typeof value.owner !== 'object' ||
   value.owner === null ||
   !('projectRoot' in value) ||
-  value.projectRoot !== realpathSync(config.tmpDir)
+  value.projectRoot !== resolve(config.tmpDir)
 )
   throw new Error('Resource config must bind the service project root');
 const owner = value.owner;
@@ -46,14 +48,11 @@ if (
   throw new Error('Invalid worker identity, task PID limit or cleanup bound');
 if (lstatSync(config.tmpDir).uid !== owner.workerUid)
   throw new Error('Project root must already belong to the unprivileged service user');
-const settingsStat = lstatSync(settingsPath);
-if (settingsStat.uid !== 0 || settingsStat.mode & 0o022)
-  throw new Error('Resource settings must be root-owned and not group/world writable');
 const child = fork(
   fileURLToPath(new URL('./resource-owner.mjs', import.meta.url)),
   [resolve(settingsPath)],
   {
-    stdio: ['ignore', 'inherit', 'pipe', 'ipc'],
+    stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
     execArgv: [],
   },
 );

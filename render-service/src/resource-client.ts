@@ -35,8 +35,7 @@ export class ResourceClient implements RenderExecutor {
   private available = false;
   private terminal = false;
   private started = false;
-  private diagnostics = '';
-  private readonly pending = new Map<string, { finish: (value: RenderExecutionResult) => void }>();
+  private pending?: { id: string; finish: (value: RenderExecutionResult) => void };
   readonly ready: Promise<void>;
   private readonly exited: Promise<number | null>;
 
@@ -45,9 +44,6 @@ export class ResourceClient implements RenderExecutor {
     private readonly cleanupMs: number,
   ) {
     this.exited = new Promise((resolve) => child.once('exit', (code) => resolve(code)));
-    child.stderr?.on('data', (data: Buffer) => {
-      this.diagnostics = (this.diagnostics + data.toString()).slice(-8192);
-    });
     this.ready = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error('Resource owner startup timed out'));
@@ -55,7 +51,7 @@ export class ResourceClient implements RenderExecutor {
       }, 10_000);
       const failReady = () => {
         clearTimeout(timer);
-        reject(new Error(`Resource owner exited before ready: ${this.diagnostics}`));
+        reject(new Error('Resource owner exited before ready; see service logs'));
       };
       child.once('exit', failReady);
       child.once('error', failReady);
@@ -82,8 +78,8 @@ export class ResourceClient implements RenderExecutor {
           typeof message.id === 'string' &&
           result(message.result)
         ) {
-          const item = this.pending.get(message.id);
-          if (!item) {
+          const item = this.pending;
+          if (!item || item.id !== message.id) {
             this.fail();
             return;
           }
@@ -111,21 +107,20 @@ export class ResourceClient implements RenderExecutor {
   private fail(): void {
     this.available = false;
     this.terminal = true;
-    for (const item of this.pending.values())
-      item.finish({
-        status: 'failed',
-        failure: {
-          code: 'execution_failed',
-          message: `Resource owner lost; platform cleanup required. ${this.diagnostics}`,
-        },
-        resources: {
-          published: 'unknown',
-          cleanupVerified: false,
-          reservationReturned: false,
-          admissionClosed: true,
-          details: { ownerLost: true },
-        },
-      });
+    this.pending?.finish({
+      status: 'failed',
+      failure: {
+        code: 'execution_failed',
+        message: 'Resource owner lost; platform cleanup required.',
+      },
+      resources: {
+        published: 'unknown',
+        cleanupVerified: false,
+        reservationReturned: false,
+        admissionClosed: true,
+        details: { ownerLost: true },
+      },
+    });
     // Closing the inherited lifeline makes S close its Producer; G independently
     // watches S and the task deadline. Never claim that a transport timeout drained A.
     if (this.child.connected) this.child.disconnect();
@@ -146,7 +141,7 @@ export class ResourceClient implements RenderExecutor {
     const deadlineNs = process.hrtime.bigint() + BigInt(request.deadlineMs) * 1_000_000n;
     if (request.signal.aborted)
       return { status: 'cancelled', failure: { code: 'cancelled', message: 'Render cancelled' } };
-    if (!this.accepting() || this.pending.size)
+    if (!this.accepting() || this.pending)
       return {
         status: 'failed',
         failure: { code: 'execution_failed', message: 'Resource owner is unavailable' },
@@ -160,7 +155,7 @@ export class ResourceClient implements RenderExecutor {
         },
       };
     await request.onProgress({ progress: 0, stage: 'preparing' });
-    if (!this.accepting() || this.pending.size || request.signal.aborted)
+    if (!this.accepting() || this.pending || request.signal.aborted)
       return request.signal.aborted
         ? { status: 'cancelled', failure: { code: 'cancelled', message: 'Render cancelled' } }
         : {
@@ -181,10 +176,10 @@ export class ResourceClient implements RenderExecutor {
       const finish = (value: RenderExecutionResult) => {
         clearTimeout(timer);
         request.signal.removeEventListener('abort', abort);
-        this.pending.delete(id);
+        this.pending = undefined;
         resolve(value);
       };
-      this.pending.set(id, { finish });
+      this.pending = { id, finish };
       request.signal.addEventListener('abort', abort, { once: true });
       this.send({
         event: 'render',

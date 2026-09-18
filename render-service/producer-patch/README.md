@@ -54,6 +54,13 @@ the task delegation. Code, package and configuration paths must be root-owned
 and immutable to the render user; the project root must belong to the configured
 non-root worker UID/GID.
 
+The configuration file and every parent directory must be root-owned, not
+writable by group/others, and free of symlinks. Both privileged readers enforce
+this before reading; root-controlled configuration updates are trusted.
+`PRODUCER_TMP_PROJECT_DIR` must name an existing absolute directory without symlink
+components; its normalized path must equal `projectRoot`. Equivalent trailing
+slashes and `..` spelling are allowed. Invalid roots fail before the service starts.
+
 Adapt `resource-config.example.json` and save it as a root-owned configuration:
 
 ```sh
@@ -99,6 +106,20 @@ admission, per-user limits and job ordering, with one active render and no
 second hidden queue. HTTP completion alone does not return a reservation.
 A closed owner closes admission and rejects queued jobs; quarantined records
 and projects remain available for platform takeover.
+
+Owner stderr is inherited by the service log stream, including diagnostics emitted
+after IPC disconnect. Public task errors use stable summaries rather than internal
+exception text; consult service logs for the original error.
+
+An unexpected Producer exception without verified settlement also closes service
+admission, even if the Producer has not reported itself closed. This deliberately
+preserves uncertainty; it does not prove that cleanup or reservation return
+succeeded. Automatic reopening is not supported. Before restarting, the operator
+must stop the old service, verify its processes and task descendants have exited,
+and reconcile retained task domains, projects and external references. Reuse the
+delegation only after verified cleanup, or provision a fresh isolated delegation
+and project root while retaining ownership of the old resources. Restart alone
+does not establish safe reclamation.
 
 ## Supported boundary
 

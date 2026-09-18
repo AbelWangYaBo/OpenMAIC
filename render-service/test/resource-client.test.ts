@@ -1,4 +1,7 @@
-import { ChildProcess } from 'node:child_process';
+import { ChildProcess, spawn } from 'node:child_process';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ResourceClient } from '../src/resource-client.js';
 import type { RenderExecutionRequest } from '../src/types.js';
@@ -174,3 +177,154 @@ it('keeps cleanup unverified when dispatch throws synchronously', async () => {
     resources: { published: 'unknown', cleanupVerified: false, reservationReturned: false },
   });
 });
+
+const cleanResult = {
+  status: 'succeeded',
+  resources: {
+    published: true,
+    cleanupVerified: true,
+    reservationReturned: true,
+    admissionClosed: false,
+    details: {},
+  },
+};
+it('allows only one dispatch across interleaved progress callbacks', async () => {
+  const { owner, child, sent } = client();
+  let resume!: () => void;
+  const first = owner.execute({
+    ...request(),
+    onProgress: () =>
+      new Promise<void>((resolve) => {
+        resume = resolve;
+      }),
+  });
+  const second = owner.execute(request());
+  const id = await dispatched(sent);
+  resume();
+  expect(await first).toMatchObject({ status: 'failed' });
+  expect(sent).toHaveLength(1);
+  child.emit('message', { event: 'result', id, result: cleanResult });
+  await expect(second).resolves.toMatchObject({ status: 'succeeded' });
+});
+it('rejects a wrong result ID and does not settle the active request as successful', async () => {
+  const { owner, child, sent } = client();
+  const pending = owner.execute(request());
+  await dispatched(sent);
+  child.emit('message', { event: 'result', id: 'wrong', result: cleanResult });
+  expect(await pending).toMatchObject({ resources: { reservationReturned: false } });
+  expect(owner.accepting()).toBe(false);
+});
+it('a duplicate old result fails closed without settling a newer task successfully', async () => {
+  const { owner, child, sent } = client();
+  const first = owner.execute(request());
+  const id = await dispatched(sent);
+  child.emit('message', { event: 'result', id, result: cleanResult });
+  await first;
+  sent.length = 0;
+  const second = owner.execute(request());
+  await dispatched(sent);
+  child.emit('message', { event: 'result', id, result: cleanResult });
+  expect(await second).toMatchObject({ resources: { reservationReturned: false } });
+});
+it('removes cancellation ownership when the result finishes and reuses the slot', async () => {
+  const { owner, child, sent } = client();
+  const abort = new AbortController();
+  const first = owner.execute(request(abort.signal));
+  const id = await dispatched(sent);
+  child.emit('message', { event: 'result', id, result: cleanResult });
+  await first;
+  abort.abort();
+  expect(sent).toHaveLength(1);
+  sent.length = 0;
+  const next = owner.execute(request());
+  const nextId = await dispatched(sent);
+  child.emit('message', { event: 'result', id: nextId, result: cleanResult });
+  await expect(next).resolves.toMatchObject({ status: 'succeeded' });
+});
+it('a result alone closes admission before completing an unknown failure', async () => {
+  const { owner, child, sent } = client();
+  const pending = owner.execute(request());
+  const id = await dispatched(sent);
+  child.emit('message', {
+    event: 'result',
+    id,
+    result: {
+      status: 'failed',
+      failure: { code: 'execution_failed', message: 'Resource render failed; see service logs' },
+      resources: {
+        published: false,
+        cleanupVerified: false,
+        reservationReturned: false,
+        admissionClosed: true,
+        details: { unexpectedFailure: true },
+      },
+    },
+  });
+  expect(owner.accepting()).toBe(false);
+  await expect(pending).resolves.toMatchObject({ status: 'failed' });
+  child.emit('message', { event: 'ready' });
+  expect(owner.accepting()).toBe(false);
+});
+
+it.each(['startup', 'after-disconnect'])(
+  'inherited service stderr preserves %s diagnostics outside public errors',
+  async (stage) => {
+    const dir = mkdtempSync(join(tmpdir(), 'resource-stderr-'));
+    const fixture = join(dir, 'owner.mjs');
+    const diagnostic = 'private /root/late-owner-diagnostic';
+    writeFileSync(
+      fixture,
+      stage === 'startup'
+        ? `console.error(${JSON.stringify(diagnostic)}); process.exit(1);`
+        : `process.on('message', () => { process.disconnect(); setTimeout(() => { console.error(${JSON.stringify(diagnostic)}); process.exit(1); }, 25); }); process.send({event:'ready'});`,
+    );
+    const script = `
+    import { fork } from 'node:child_process';
+    import { ResourceClient } from ${JSON.stringify(new URL('../src/resource-client.ts', import.meta.url).href)};
+    const child = fork(${JSON.stringify(fixture)}, [], {stdio:['ignore','inherit','inherit','ipc'], execArgv:[]});
+    const closed = new Promise(resolve => child.once('close', resolve));
+    const owner = new ResourceClient(child, 10);
+    try {
+      await owner.ready;
+      const result = await owner.execute({projectDir:'/work/render',outputPath:'/work/render/output.mp4',options:{fps:30,quality:'standard',format:'mp4'},signal:new AbortController().signal,deadlineMs:1000,onProgress:()=>{}});
+      console.log(JSON.stringify(result));
+    } catch (error) { console.log(JSON.stringify({startupError:error.message})); }
+    await closed;
+  `;
+    try {
+      const processResult = await new Promise<{
+        code: number | null;
+        stdout: string;
+        stderr: string;
+      }>((resolve, reject) => {
+        const process = spawn(
+          globalThis.process.execPath,
+          ['--import', 'tsx', '--input-type=module', '-e', script],
+          { timeout: 10000 },
+        );
+        let stdout = '';
+        let stderr = '';
+        process.stdout.on('data', (bytes) => {
+          stdout += bytes;
+        });
+        process.stderr.on('data', (bytes) => {
+          stderr += bytes;
+        });
+        process.once('error', reject);
+        process.once('close', (code) => resolve({ code, stdout, stderr }));
+      });
+      expect(processResult.code).toBe(0);
+      expect(processResult.stderr).toContain(diagnostic);
+      expect(processResult.stdout).not.toContain(diagnostic);
+      const result = JSON.parse(processResult.stdout);
+      if (stage === 'startup') expect(result.startupError).toMatch(/before ready/);
+      else
+        expect(result).toMatchObject({
+          resources: { published: 'unknown', cleanupVerified: false, reservationReturned: false },
+        });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+  15000,
+);
