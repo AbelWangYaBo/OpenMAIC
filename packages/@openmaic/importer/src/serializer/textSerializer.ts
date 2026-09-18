@@ -993,6 +993,8 @@ export interface RenderTextBodyOptions {
    * stop overshoots the box we cap the indent so a usable text column remains.
    */
   frameWidthPx?: number;
+  /** Table width for hanging-punctuation eligibility only; never clamps tab indents. */
+  punctuationFrameWidthPx?: number;
   /** Text frame height in output CSS coordinates. Used by preset text-warp layouts. */
   frameHeightPx?: number;
   /** Force paragraph text to stay on one line when PPT will grow/rotate the box instead of wrapping. */
@@ -1256,7 +1258,7 @@ export function renderTextBody(
       const paragraphText = paragraph.runs.map((r) => r.text ?? '').join('');
       const bp = textBody.bodyProperties;
       const availableWidth =
-        (options?.frameWidthPx ?? 0) -
+        (options?.punctuationFrameWidthPx ?? options?.frameWidthPx ?? 0) -
         emuToPx(
           (options?.cellMargins?.lIns ?? bp?.numAttr('lIns') ?? 91440) +
             (options?.cellMargins?.rIns ?? bp?.numAttr('rIns') ?? 91440),

@@ -7,12 +7,12 @@ import { parseTableNode } from '../src/model/nodes/TableNode';
 import { tableToElement } from '../src/serializer/tableSerializer';
 import { transformParsedToSlides } from '../src/import-pipeline/transformParsedToSlides';
 import { createMockImportContext } from '../src/import-pipeline/mockContext';
-import { minimalCtx } from './helpers';
+import { minimalCtx, parseTxBody } from './helpers';
 
 const fixture = readFileSync(resolve(__dirname, 'fixtures/slide6-table.xml'), 'utf8');
-async function importHeader(xml = fixture) {
-  const parsed = tableToElement(parseTableNode(parseXml(xml)), minimalCtx(), 0);
-  const raw = parsed.data[0][3].text;
+async function importHeader(xml = fixture, node = parseTableNode(parseXml(xml)), column = 3) {
+  const parsed = tableToElement(node, minimalCtx(), 0);
+  const raw = parsed.data[0][column].text;
   const { slides } = await transformParsedToSlides(
     {
       size: { width: 960, height: 540 },
@@ -30,7 +30,7 @@ async function importHeader(xml = fixture) {
   );
   const table = slides[0].elements[0];
   if (table.type !== 'table') throw new Error('Expected table');
-  const cell = table.data[0][3];
+  const cell = table.data[0][column];
   const host = document.createElement('div');
   host.innerHTML = cell.text;
   return { raw, cell, host };
@@ -59,4 +59,26 @@ describe('imported table hanging punctuation', () => {
     expect(raw).not.toContain('data-pptx-hanging-punctuation');
     expect(host.querySelector('[data-pptx-hanging-punctuation]')).toBeNull();
   });
+});
+
+describe('ordinary table tab stops', () => {
+  it.each([true, false])(
+    'preserves a tab beyond half the cell width (explicit margins: %s)',
+    async (withMargins) => {
+      const node = parseTableNode(parseXml(fixture));
+      node.columns[0] = 160;
+      const cell = node.rows[0].cells[0];
+      if (!withMargins) cell.properties = undefined;
+      cell.textBody = parseTxBody(
+        '<a:bodyPr/><a:p><a:pPr><a:tabLst><a:tab pos="1143000" algn="l"/>' +
+          '</a:tabLst></a:pPr><a:r><a:rPr sz="1200"/><a:t>\tHello</a:t></a:r></a:p>',
+      );
+      const { raw, host } = await importHeader(fixture, node, 0);
+      // 1,143,000 EMU = 120 px = 90 pt, then 120 canvas px at ratio 4/3.
+      expect(host.querySelector('p')?.style.marginLeft).toBe('120px');
+      expect(raw).toContain('margin-left: 120px');
+      expect(host.textContent).toBe('Hello');
+      expect(host.querySelector('[data-pptx-hanging-punctuation]')).toBeNull();
+    },
+  );
 });
