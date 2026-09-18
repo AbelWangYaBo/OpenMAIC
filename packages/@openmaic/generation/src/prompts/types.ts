@@ -26,7 +26,8 @@ export type SnippetId =
   | 'media-safety-guidelines'
   | 'slide-image-instructions'
   | 'slide-generated-image-instructions'
-  | 'slide-video-instructions';
+  | 'slide-video-instructions'
+  | 'speech-tts-readability';
 
 /** Loaded prompt template. */
 export interface LoadedPrompt {
