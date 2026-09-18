@@ -1257,11 +1257,13 @@ export function renderTextBody(
       const bp = textBody.bodyProperties;
       const availableWidth =
         (options?.frameWidthPx ?? 0) -
-        emuToPx((bp?.numAttr('lIns') ?? 91440) + (bp?.numAttr('rIns') ?? 91440));
+        emuToPx(
+          (options?.cellMargins?.lIns ?? bp?.numAttr('lIns') ?? 91440) +
+            (options?.cellMargins?.rIns ?? bp?.numAttr('rIns') ?? 91440),
+        );
       const emWidth = (effectiveFontSize * 4) / 3;
       const compactFinalPunctuation =
         merged.hangingPunctuation === true &&
-        !options?.cellMargins &&
         !noWrap &&
         (!bp?.attr('vert') || bp.attr('vert') === 'horz') &&
         (bp?.numAttr('numCol') ?? 1) === 1 &&
@@ -1748,7 +1750,7 @@ export function renderTextBody(
         const inner =
           compactFinalPunctuation && run === lastTextRun
             ? formatRunTextForHtml(runText.slice(0, -1)) +
-              `<span style="display:inline-block;width:0.5em">${escapeHtml(runText.slice(-1))}</span>`
+              `<span${options?.cellMargins ? ' data-pptx-hanging-punctuation="true"' : ''} style="display:inline-block;width:0.5em">${escapeHtml(runText.slice(-1))}</span>`
             : formatRunTextForHtml(runText);
         const tabStyleSuffix = runText.includes('\t') ? ';white-space: pre' : '';
 
