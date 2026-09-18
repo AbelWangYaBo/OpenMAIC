@@ -47,6 +47,24 @@ describe('imported table hanging punctuation', () => {
     expect(host.textContent).toBe('你的活动高峰时间？');
     expect(host.querySelector('p')?.style.whiteSpace).not.toBe('nowrap');
   });
+  it.each(['omitted', 'empty'])('keeps punctuation with %s cell properties', async (properties) => {
+    const xml = fixture.replace(
+      /<a:tcPr\b[^>]*>[\s\S]*?<\/a:tcPr>/g,
+      properties === 'empty' ? '<a:tcPr/>' : '',
+    );
+    const node = parseTableNode(parseXml(xml));
+    // Default 7.2pt side margins; the short heading only fits after half-em compression.
+    node.columns[3] = (('你的活动高峰时间？'.length - 0.25) * 20 * 4) / 3 + 19.2;
+    expect(node.rows[0].cells[3].properties?.exists() ?? false).toBe(properties === 'empty');
+    const { raw, cell, host } = await importHeader(xml, node);
+    expect(raw).toContain('data-pptx-hanging-punctuation="true"');
+    const punctuation = host.querySelector<HTMLElement>('[data-pptx-hanging-punctuation="true"]');
+    expect(punctuation?.textContent).toBe('？');
+    expect(punctuation?.style.width).toBe('0.5em');
+    expect(punctuation?.style.display).toBe('inline-block');
+    expect(cell.padding).toBe('3.6pt 7.2pt');
+    expect(host.textContent).toBe('你的活动高峰时间？');
+  });
   it.each([
     ['disabled', fixture.replaceAll('hangingPunct="1"', 'hangingPunct="0"')],
     [

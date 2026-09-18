@@ -1752,7 +1752,7 @@ export function renderTextBody(
         const inner =
           compactFinalPunctuation && run === lastTextRun
             ? formatRunTextForHtml(runText.slice(0, -1)) +
-              `<span${options?.cellMargins ? ' data-pptx-hanging-punctuation="true"' : ''} style="display:inline-block;width:0.5em">${escapeHtml(runText.slice(-1))}</span>`
+              `<span${options?.punctuationFrameWidthPx !== undefined ? ' data-pptx-hanging-punctuation="true"' : ''} style="display:inline-block;width:0.5em">${escapeHtml(runText.slice(-1))}</span>`
             : formatRunTextForHtml(runText);
         const tabStyleSuffix = runText.includes('\t') ? ';white-space: pre' : '';
 
