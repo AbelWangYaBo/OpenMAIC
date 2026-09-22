@@ -19,6 +19,7 @@ import type {
   ImageGenerationResult,
 } from '../types';
 import { probeAuth } from '../probe-auth';
+import { assertNotRedirected } from '../redirect-guard';
 import { requireModel } from '../require-model';
 
 const DEFAULT_MODEL = 'grok-imagine-image';
@@ -59,6 +60,7 @@ export async function generateWithGrokImage(
 
   const response = await fetch(`${baseUrl}/images/generations`, {
     method: 'POST',
+    redirect: 'manual',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${config.apiKey}`,
@@ -70,6 +72,8 @@ export async function generateWithGrokImage(
       response_format: 'url',
     }),
   });
+
+  assertNotRedirected(response, 'Grok Image');
 
   if (!response.ok) {
     const text = await response.text();
