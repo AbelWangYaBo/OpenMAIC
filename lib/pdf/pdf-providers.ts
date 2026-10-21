@@ -139,10 +139,12 @@
 
 import { extractText, getDocumentProxy, extractImages } from 'unpdf';
 import sharp from 'sharp';
-import type { PDFParserConfig } from './types';
+import type { PDFParserConfig, PDFProviderId } from './types';
 import type { ParsedPdfContent } from '@/lib/types/pdf';
 import { PDF_PROVIDERS } from './constants';
 import { createLogger } from '@/lib/logger';
+import { parseWithPaddleOCR } from './paddleocr';
+import { parseWithPaddleCloud } from './paddleocr-cloud';
 import { extractMinerUResult } from './mineru-parser';
 import { parseWithMinerUCloud } from './mineru-cloud';
 import { parseWithAliDocMindClient } from './alidocmind-client';
@@ -217,11 +219,19 @@ export async function parsePDF(
     throw new Error(`Unknown PDF provider: ${config.providerId}`);
   }
 
-  // Validate API key if required
-  if (provider.requiresApiKey && !config.apiKey) {
-    // AliDocMind uses AK/SK instead of a single apiKey; check separately.
-    const envAvailable = config.allowEnvFallback && !!process.env.ALIDOCMIND_ACCESS_KEY_ID;
-    if (config.providerId !== 'alidocmind' || (!config.accessKeyId && !envAvailable)) {
+  // Validate credentials if required. AliDocMind and PaddleOCR Cloud use
+  // AK/SK pairs rather than a single apiKey, each with its own env fallback.
+  const AKSK_ENV_FALLBACK: Partial<Record<PDFProviderId, string>> = {
+    alidocmind: 'ALIDOCMIND_ACCESS_KEY_ID',
+    'paddleocr-cloud': 'PADDLEOCR_CLOUD_ACCESS_KEY_ID',
+  };
+  const envFallbackId = AKSK_ENV_FALLBACK[config.providerId];
+  if (provider.requiresApiKey && !config.apiKey && !envFallbackId) {
+    throw new Error(`API key required for PDF provider: ${config.providerId}`);
+  }
+  if (envFallbackId && !config.accessKeyId) {
+    const envAvailable = config.allowEnvFallback && !!process.env[envFallbackId];
+    if (!envAvailable) {
       throw new Error(`API key required for PDF provider: ${config.providerId}`);
     }
   }
@@ -245,6 +255,14 @@ export async function parsePDF(
 
     case 'alidocmind':
       result = await parseWithAliDocMind(config, pdfBuffer, options);
+      break;
+
+    case 'paddleocr':
+      result = await parseWithPaddleOCR(config, pdfBuffer, { mimeType: options?.mimeType });
+      break;
+
+    case 'paddleocr-cloud':
+      result = await parseWithPaddleCloud(config, pdfBuffer, options?.fileName);
       break;
 
     default:

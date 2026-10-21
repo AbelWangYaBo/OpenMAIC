@@ -52,7 +52,12 @@ function pdfLayoutType(value: unknown): NonNullable<ParsedPdfContent['layout']>[
 }
 
 function isMinerUMarkdownParser(parser: unknown): boolean {
-  return parser === 'mineru' || parser === 'mineru-cloud';
+  return (
+    parser === 'mineru' ||
+    parser === 'mineru-cloud' ||
+    parser === 'paddleocr' ||
+    parser === 'paddleocr-cloud'
+  );
 }
 
 export function parsedPdfToDocumentArtifact(
