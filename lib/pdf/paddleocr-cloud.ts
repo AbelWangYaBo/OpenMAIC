@@ -93,6 +93,21 @@ export function clearPaddleCloudTokenCache(): void {
   tokenCache.clear();
 }
 
+/**
+ * Read a JSON response body. A malformed payload is null (the caller decides
+ * what that means), but a transport or abort failure while reading the body
+ * propagates: swallowing it would erase the transient signal the retry
+ * classifier needs.
+ */
+async function readJsonBody<T>(response: Response): Promise<T | null> {
+  try {
+    return (await response.json()) as T;
+  } catch (error) {
+    if (error instanceof SyntaxError) return null;
+    throw error;
+  }
+}
+
 async function getAccessToken(
   baseUrl: string,
   accessKeyId: string,
@@ -115,15 +130,20 @@ async function getAccessToken(
     },
     apiRootPolicy(managed),
   );
-  const body = (await response.json().catch(() => null)) as {
+  const body = await readJsonBody<{
     access_token?: unknown;
     expires_in?: unknown;
     error?: unknown;
     error_description?: unknown;
-  } | null;
+  }>(response);
   if (!response.ok || !body || typeof body.access_token !== 'string' || !body.access_token) {
     const detail = typeof body?.error_description === 'string' ? body.error_description : '';
-    throw new Error(`PaddleOCR Cloud authentication failed${detail ? `: ${detail}` : ''}`);
+    // Keep the HTTP status on the error: a 5xx from the OAuth endpoint is a
+    // transient outage, and the retry classifier reads it from here.
+    throw Object.assign(
+      new Error(`PaddleOCR Cloud authentication failed${detail ? `: ${detail}` : ''}`),
+      { status: response.status },
+    );
   }
   const expiresIn = typeof body.expires_in === 'number' ? body.expires_in : 2592000;
   tokenCache.set(key, {
@@ -337,11 +357,14 @@ async function downloadLinkImage(
       RESPONSE_URL_POLICY,
     );
   } catch (error) {
-    if (ctx.signal?.aborted || isRejectedRedirectError(error)) throw error;
+    // Only the caller's abort is ours to propagate; the phase deadline is an
+    // internal budget that just stops optional enrichment.
+    if (ctx.config.signal?.aborted || isRejectedRedirectError(error)) throw error;
     log.warn(`[PaddleCloud] image download for "${link.path}" failed, skipped:`, error);
     return null;
   }
   if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
     log.warn(
       `[PaddleCloud] image download for "${link.path}" failed (${response.status}), skipped`,
     );
@@ -444,7 +467,7 @@ export async function parseWithPaddleCloud(
       },
       apiRootPolicy(config.managed),
     );
-    submitJson = (await submitResponse.json().catch(() => null)) as SubmitResponse | null;
+    submitJson = await readJsonBody<SubmitResponse>(submitResponse);
     const code = submitJson?.error_code;
     if (submitResponse.status === 429 || code === 18) {
       continue; // QPS refusal: backoff and retry
@@ -475,6 +498,7 @@ export async function parseWithPaddleCloud(
   // Step 2: poll the query endpoint (5-10s cadence per the API docs).
   const deadline = Date.now() + POLL_MAX_MS;
   let result: NonNullable<QueryResponse['result']> | null = null;
+  let tokenRefreshes = 0;
   while (Date.now() < deadline) {
     await sleep(POLL_INTERVAL_MS);
     const queryResponse = await providerFetch(
@@ -489,21 +513,41 @@ export async function parseWithPaddleCloud(
     );
     // The query API is rate-limited to 5 QPS: an HTTP 429 is transient and
     // must be handled before the generic !ok branch (which material-extraction
-    // classifies as permanent).
-    if (queryResponse.status === 429) continue;
+    // classifies as permanent). The body is cancelled so a throttled job
+    // cannot pin one connection per poll for the whole deadline.
+    if (queryResponse.status === 429) {
+      await queryResponse.body?.cancel().catch(() => {});
+      continue;
+    }
     // Other HTTP-level failures surface immediately instead of being read as
     // a provider status.
     if (!queryResponse.ok) {
       throw new Error(`PaddleOCR Cloud query failed (HTTP ${queryResponse.status})`);
     }
-    const queryJson = (await queryResponse.json().catch(() => null)) as QueryResponse | null;
+    const queryJson = await readJsonBody<QueryResponse>(queryResponse);
     const code = queryJson?.error_code;
     if (!queryJson || (code ?? 0) !== 0) {
       // Baidu QPS-limit responses are transient (query API: 5 QPS).
       if (code === 18 || queryResponse.status === 429) continue;
-      // An invalid/expired token invalidates the cache; the caller retries.
+      // The task is already submitted, so an invalid/expired token must not
+      // strand it: evict the cache, reacquire, and keep polling. Bound the
+      // refreshes so persistently bad credentials cannot loop to the deadline.
       if (code === 110 || code === 111) {
         tokenCache.delete(cacheKey(baseUrl, accessKeyId, accessKeySecret));
+        if (tokenRefreshes >= 2) {
+          throw new Error(
+            `PaddleOCR Cloud query failed: ${queryJson?.error_msg || `code ${code}`}`,
+          );
+        }
+        tokenRefreshes += 1;
+        token = await getAccessToken(
+          baseUrl,
+          accessKeyId,
+          accessKeySecret,
+          config.managed,
+          config.signal,
+        );
+        continue;
       }
       throw new Error(`PaddleOCR Cloud query failed: ${queryJson?.error_msg || `code ${code}`}`);
     }
@@ -573,12 +617,30 @@ export async function parseWithPaddleCloud(
     AbortSignal.timeout(IMAGE_PHASE_MAX_MS),
   ]);
   for (const link of (imageLinks ?? []).slice(0, MAX_IMAGE_LINKS)) {
-    const dataUrl = await downloadLinkImage(parsed, link, {
-      config,
-      signal: phaseSignal,
-      linkBytesTotal: () => linkBytesTotal,
-      addBytes: (n) => (linkBytesTotal += n),
-    });
+    // A caller abort still fails the parse; the internal phase deadline only
+    // stops enrichment, leaving the already-parsed markdown intact.
+    if (config.signal?.aborted) {
+      throw config.signal.reason ?? new DOMException('Aborted', 'AbortError');
+    }
+    if (phaseSignal.aborted) {
+      log.warn('[PaddleCloud] image enrichment deadline reached, serving the parsed result');
+      break;
+    }
+    let dataUrl: string | null;
+    try {
+      dataUrl = await downloadLinkImage(parsed, link, {
+        config,
+        signal: phaseSignal,
+        linkBytesTotal: () => linkBytesTotal,
+        addBytes: (n) => (linkBytesTotal += n),
+      });
+    } catch (error) {
+      // Aborts or policy refusals are the caller's; anything else is a
+      // per-figure enrichment failure and must not discard the markdown.
+      if (config.signal?.aborted || isRejectedRedirectError(error)) throw error;
+      log.warn(`[PaddleCloud] image enrichment for "${link.path}" failed, skipped:`, error);
+      continue;
+    }
     if (dataUrl) {
       parsed.images.push(dataUrl);
       const id = `img_${parsed.images.length}`;

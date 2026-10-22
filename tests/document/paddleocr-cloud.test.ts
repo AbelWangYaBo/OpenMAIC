@@ -17,6 +17,7 @@ vi.mock('@/lib/server/audio-provider-fetch', async (importOriginal) => {
 });
 
 import { parseWithPaddleCloud, clearPaddleCloudTokenCache } from '@/lib/pdf/paddleocr-cloud';
+import { isTransientExtractionError } from '@/lib/server/material-extraction/errors';
 
 // Public IP literals: the real SSRF validation passes them without DNS.
 const POLL_TICK = 5000;
@@ -282,7 +283,7 @@ describe('PaddleOCR Cloud (Baidu document parsing)', () => {
     vi.stubGlobal('fetch', vi.fn());
 
     const promise = parseWithPaddleCloud(
-      { providerId: 'paddleocr-cloud', apiKey: 'k', signal: controller.signal },
+      { ...CONFIG, signal: controller.signal },
       Buffer.from('a'),
       'a.pdf',
     );
@@ -292,6 +293,7 @@ describe('PaddleOCR Cloud (Baidu document parsing)', () => {
     const queriesBefore = transport.providerFetch.mock.calls.filter(([u]) =>
       String(u).includes('/task/query'),
     ).length;
+    expect(queriesBefore).toBeGreaterThan(0);
     controller.abort(new DOMException('Aborted', 'AbortError'));
     await vi.advanceTimersByTimeAsync(POLL_TICK * 3);
     await expectation.catch(() => {});
@@ -574,6 +576,206 @@ describe('PaddleOCR Cloud (Baidu document parsing)', () => {
     const result = await promise;
     expect(result.text).toBe('md');
     expect(result.images).toEqual([]);
+  });
+
+  it('keeps the OAuth HTTP status so a 5xx stays retryable', async () => {
+    transport.providerFetch.mockResolvedValue(new Response('{}', { status: 503 }));
+
+    const error = await parseWithPaddleCloud(CONFIG, Buffer.from('a'), 'a.pdf').catch((e) => e);
+    expect(error.status).toBe(503);
+    expect(isTransientExtractionError(error)).toBe(true);
+  });
+
+  it('propagates a query body read failure instead of masking it as a provider code', async () => {
+    transport.providerFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/oauth/2.0/token')) {
+        return okJson({ access_token: 'tok-1', expires_in: 2592000 });
+      }
+      if (url.includes('/paddle-vl-parser/task?')) {
+        return okJson({ error_code: 0, result: { task_id: 'task-11' } });
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        body: null,
+        json: async () => {
+          throw new TypeError('terminated');
+        },
+      } as unknown as Response;
+    });
+
+    const promise = parseWithPaddleCloud(CONFIG, Buffer.from('a'), 'a.pdf');
+    const expectation = expect(promise).rejects.toThrow('terminated');
+    await vi.runAllTimersAsync();
+    await expectation;
+  });
+
+  it('disposes a throttled query response before polling again', async () => {
+    const throttled = new Response('slow down', { status: 429 });
+    const cancel = vi.spyOn(throttled.body!, 'cancel');
+    let queries = 0;
+    transport.providerFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/oauth/2.0/token')) {
+        return okJson({ access_token: 'tok-1', expires_in: 2592000 });
+      }
+      if (url.includes('/paddle-vl-parser/task?')) {
+        return okJson({ error_code: 0, result: { task_id: 'task-12' } });
+      }
+      if (url.includes('/task/query')) {
+        queries += 1;
+        if (queries === 1) return throttled;
+        return okJson({
+          error_code: 0,
+          result: {
+            task_id: 'task-12',
+            status: 'success',
+            markdown_url: MARKDOWN_URL,
+            parse_result_url: null,
+          },
+        });
+      }
+      return new Response('md', { status: 200 });
+    });
+
+    const promise = parseWithPaddleCloud(CONFIG, Buffer.from('a'), 'a.pdf');
+    const expectation = expect(promise).resolves.toMatchObject({ text: 'md' });
+    await vi.runAllTimersAsync();
+    await expectation;
+    expect(cancel).toHaveBeenCalled();
+  });
+
+  it('reacquires the token and keeps polling when the task reports it expired', async () => {
+    let tokenCalls = 0;
+    let queries = 0;
+    const queryTokens: string[] = [];
+    transport.providerFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/oauth/2.0/token')) {
+        tokenCalls += 1;
+        return okJson({ access_token: `tok-${tokenCalls}`, expires_in: 2592000 });
+      }
+      if (url.includes('/paddle-vl-parser/task?')) {
+        return okJson({ error_code: 0, result: { task_id: 'task-13' } });
+      }
+      if (url.includes('/task/query')) {
+        queries += 1;
+        queryTokens.push(new URL(url).searchParams.get('access_token') ?? '');
+        if (queries === 1) return okJson({ error_code: 110, error_msg: 'Access token invalid' });
+        return okJson({
+          error_code: 0,
+          result: {
+            task_id: 'task-13',
+            status: 'success',
+            markdown_url: MARKDOWN_URL,
+            parse_result_url: null,
+          },
+        });
+      }
+      return new Response('md', { status: 200 });
+    });
+
+    const promise = parseWithPaddleCloud(CONFIG, Buffer.from('a'), 'a.pdf');
+    const expectation = expect(promise).resolves.toMatchObject({ text: 'md' });
+    await vi.runAllTimersAsync();
+    await expectation;
+    expect(tokenCalls).toBe(2);
+    expect(queryTokens).toEqual(['tok-1', 'tok-2']);
+  });
+
+  it('serves the parsed markdown when the image phase deadline expires', async () => {
+    const IMG_URL = 'https://93.184.216.34/images/hang.png';
+    // AbortSignal.timeout is native and unaffected by fake timers, so the
+    // phase deadline is driven through a controller instead.
+    const phase = new AbortController();
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => phase.signal);
+    let imageStarted!: () => void;
+    const imageReached = new Promise<void>((resolve) => (imageStarted = resolve));
+    transport.providerFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes('/oauth/2.0/token')) {
+        return okJson({ access_token: 'tok-1', expires_in: 2592000 });
+      }
+      if (url.includes('/paddle-vl-parser/task?')) {
+        return okJson({ error_code: 0, result: { task_id: 'task-14' } });
+      }
+      if (url.includes('/task/query')) {
+        return okJson({
+          error_code: 0,
+          result: {
+            task_id: 'task-14',
+            status: 'success',
+            markdown_url: MARKDOWN_URL,
+            parse_result_url: PARSE_URL,
+          },
+        });
+      }
+      if (url === MARKDOWN_URL) return new Response('md', { status: 200 });
+      if (url === PARSE_URL) {
+        return okJson({
+          pages: [{ page_num: 0, text: 'md', images: [{ data_url: IMG_URL }] }],
+        });
+      }
+      if (url === IMG_URL) {
+        // A storage link that accepts the connection and never answers.
+        imageStarted();
+        return new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          );
+        });
+      }
+      throw new Error(`Unexpected transport URL: ${url}`);
+    });
+
+    const promise = parseWithPaddleCloud(CONFIG, Buffer.from('a'), 'a.pdf');
+    await vi.advanceTimersByTimeAsync(POLL_TICK + 10);
+    await imageReached;
+    // The internal deadline fires: enrichment stops, the markdown survives.
+    phase.abort(new DOMException('Aborted', 'AbortError'));
+    const result = await promise;
+    expect(result.text).toBe('md');
+    expect(result.images).toEqual([]);
+    timeoutSpy.mockRestore();
+  });
+
+  it('cancels a non-success image response body', async () => {
+    const dead = new Response('nope', { status: 404 });
+    const cancel = vi.spyOn(dead.body!, 'cancel');
+    const IMG_URL = 'https://93.184.216.34/images/dead-404.png';
+    transport.providerFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/oauth/2.0/token')) {
+        return okJson({ access_token: 'tok-1', expires_in: 2592000 });
+      }
+      if (url.includes('/paddle-vl-parser/task?')) {
+        return okJson({ error_code: 0, result: { task_id: 'task-15' } });
+      }
+      if (url.includes('/task/query')) {
+        return okJson({
+          error_code: 0,
+          result: {
+            task_id: 'task-15',
+            status: 'success',
+            markdown_url: MARKDOWN_URL,
+            parse_result_url: PARSE_URL,
+          },
+        });
+      }
+      if (url === MARKDOWN_URL) return new Response('md', { status: 200 });
+      if (url === PARSE_URL) {
+        return okJson({
+          pages: [{ page_num: 0, text: 'md', images: [{ data_url: IMG_URL }] }],
+        });
+      }
+      if (url === IMG_URL) return dead;
+      throw new Error(`Unexpected transport URL: ${url}`);
+    });
+
+    const promise = parseWithPaddleCloud(CONFIG, Buffer.from('a'), 'a.pdf');
+    const expectation = expect(promise).resolves.toMatchObject({ text: 'md' });
+    await vi.runAllTimersAsync();
+    await expectation;
+    expect(cancel).toHaveBeenCalled();
   });
 
   it('requires the AK/SK pair before any network call', async () => {
