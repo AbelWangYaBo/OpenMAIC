@@ -19,6 +19,7 @@ vi.mock('@/lib/server/audio-provider-fetch', async (importOriginal) => {
 import { parseWithPaddleCloud, clearPaddleCloudTokenCache } from '@/lib/pdf/paddleocr-cloud';
 
 // Public IP literals: the real SSRF validation passes them without DNS.
+const POLL_TICK = 5000;
 const MARKDOWN_URL = 'https://93.184.216.34/result/doc.md';
 const PARSE_URL = 'https://93.184.216.34/result/doc.json';
 
@@ -27,7 +28,7 @@ function okJson(obj: unknown) {
 }
 
 function installCloud(options?: { markdownUrl?: string; parseResultUrl?: string | null }) {
-  transport.providerFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+  transport.providerFetch.mockImplementation(async (url: string) => {
     if (url.includes('/oauth/2.0/token')) {
       return okJson({ access_token: 'tok-1', expires_in: 2592000 });
     }
@@ -125,6 +126,18 @@ describe('PaddleOCR Cloud (Baidu document parsing)', () => {
     await expectation;
     expect(
       transport.providerFetch.mock.calls.filter(([u]) => String(u).includes('169.254')).length,
+    ).toBe(0);
+  });
+
+  it('refuses a non-HTTPS result URL', async () => {
+    installCloud({ markdownUrl: 'http://93.184.216.34/result/doc.md', parseResultUrl: null });
+    const promise = parseWithPaddleCloud(CONFIG, Buffer.from('%PDF-doc'), 'lesson.pdf');
+    const expectation = expect(promise).rejects.toThrow('is not HTTPS');
+    await vi.runAllTimersAsync();
+    await expectation;
+    // The insecure download must never be issued.
+    expect(
+      transport.providerFetch.mock.calls.filter(([u]) => String(u).startsWith('http://')).length,
     ).toBe(0);
   });
 
@@ -237,7 +250,7 @@ describe('PaddleOCR Cloud (Baidu document parsing)', () => {
     expect(submitPolicy.allowLocalNetworks).toBe(true);
     // ...while the response-supplied downloads stay strict public.
     const download = calls.find(([u]) => u === MARKDOWN_URL)!;
-    expect(download[2]).toEqual({ allowLocalNetworks: false });
+    expect(download[2]).toEqual({ allowLocalNetworks: false, requireHttps: true });
     vi.unstubAllEnvs();
   });
 
@@ -272,6 +285,40 @@ describe('PaddleOCR Cloud (Baidu document parsing)', () => {
     const expectation = expect(promise).rejects.toThrow('exceeds the 33554432-byte read limit');
     await vi.runAllTimersAsync().catch(() => {});
     await expectation;
+  });
+
+  it('stops polling immediately when the caller signal aborts', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    transport.providerFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/oauth/2.0/token')) {
+        return okJson({ access_token: 'tok-1', expires_in: 2592000 });
+      }
+      if (url.includes('/paddle-vl-parser/task?')) {
+        return okJson({ error_code: 0, result: { task_id: 'task-4' } });
+      }
+      return okJson({ error_code: 0, result: { task_id: 'task-4', status: 'running' } });
+    });
+    vi.stubGlobal('fetch', vi.fn());
+
+    const promise = parseWithPaddleCloud(
+      { providerId: 'paddleocr-cloud', apiKey: 'k', model: 'm', signal: controller.signal },
+      Buffer.from('a'),
+      'a.pdf',
+    );
+    const expectation = expect(promise).rejects.toThrow();
+    // One poll lands; aborting during the sleep must stop the next query.
+    await vi.advanceTimersByTimeAsync(POLL_TICK);
+    const queriesBefore = transport.providerFetch.mock.calls.filter(([u]) =>
+      String(u).includes('/task/query'),
+    ).length;
+    controller.abort(new DOMException('Aborted', 'AbortError'));
+    await vi.advanceTimersByTimeAsync(POLL_TICK * 3);
+    await expectation.catch(() => {});
+    const queriesAfter = transport.providerFetch.mock.calls.filter(([u]) =>
+      String(u).includes('/task/query'),
+    ).length;
+    expect(queriesAfter).toBe(queriesBefore);
   });
 
   it('requires the AK/SK pair before any network call', async () => {

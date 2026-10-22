@@ -42,8 +42,12 @@ export const MAX_FILE_DATA_BYTES = 50 * 1024 * 1024;
 export const MAX_JSON_BYTES = 16 * 1024 * 1024;
 export const MAX_MARKDOWN_BYTES = 32 * 1024 * 1024;
 
-/** The strict public policy: result URLs are response-supplied, never ours. */
-const RESPONSE_URL_POLICY: ProviderFetchPolicy = { allowLocalNetworks: false };
+/** The strict public policy: result URLs are response-supplied, never ours,
+ * and HTTPS-only on every hop — the payloads carry the parsed document. */
+const RESPONSE_URL_POLICY: ProviderFetchPolicy = {
+  allowLocalNetworks: false,
+  requireHttps: true,
+};
 
 /**
  * The API root is operator configuration when managed (it may sit on a
@@ -153,6 +157,9 @@ async function downloadResponseUrl(
 ): Promise<string> {
   if (typeof rawUrl !== 'string' || !rawUrl) {
     throw new Error(`PaddleOCR Cloud result is missing ${label}`);
+  }
+  if (!rawUrl.startsWith('https://')) {
+    throw new Error(`PaddleOCR Cloud ${label} is not HTTPS`);
   }
   const ssrfError = await validateUrlForSSRFWithPolicy(rawUrl, { allowLocalNetworks: false });
   if (ssrfError) {
@@ -266,8 +273,24 @@ export async function parseWithPaddleCloud(
   // Step 2: poll the query endpoint (5-10s cadence per the API docs).
   const deadline = Date.now() + POLL_MAX_MS;
   let result: NonNullable<QueryResponse['result']> | null = null;
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve, reject) => {
+      if (config.signal?.aborted) {
+        reject(config.signal.reason ?? new DOMException('Aborted', 'AbortError'));
+        return;
+      }
+      const timer = setTimeout(resolve, ms);
+      config.signal?.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          reject(config.signal!.reason ?? new DOMException('Aborted', 'AbortError'));
+        },
+        { once: true },
+      );
+    });
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    await sleep(POLL_INTERVAL_MS);
     const queryResponse = await providerFetch(
       `${baseUrl}${QUERY_PATH}?access_token=${encodeURIComponent(token)}`,
       {
