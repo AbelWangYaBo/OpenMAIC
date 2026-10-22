@@ -43,6 +43,11 @@ export interface DocumentExtractorManifestEntry {
   supportedMimeTypes: readonly string[];
   capabilities: DocumentExtractorCapabilities;
   /**
+   * The parser's text output is Markdown (rendered as a markdown block and
+   * protected from whitespace normalization), not plain text.
+   */
+  markdownOutput?: boolean;
+  /**
    * Whether extraction calls a service the operator must configure (a
    * server-providers.yml `pdf` entry or `PDF_*` env). Self-contained
    * extractors run in-process and are always available.
@@ -107,6 +112,7 @@ const DOCUMENT_EXTRACTOR_MANIFEST: Record<string, DocumentExtractorManifestEntry
     id: 'mineru',
     displayName: 'MinerU',
     version: '1',
+    markdownOutput: true,
     supportedMimeTypes: MINERU_SELFHOST_MIMES,
     requiresServiceConfig: true,
     capabilities: {
@@ -123,6 +129,7 @@ const DOCUMENT_EXTRACTOR_MANIFEST: Record<string, DocumentExtractorManifestEntry
     id: 'mineru-cloud',
     displayName: 'MinerU (Cloud)',
     version: '1',
+    markdownOutput: true,
     supportedMimeTypes: MINERU_CLOUD_MIMES,
     requiresServiceConfig: true,
     capabilities: {
@@ -139,6 +146,7 @@ const DOCUMENT_EXTRACTOR_MANIFEST: Record<string, DocumentExtractorManifestEntry
     id: 'paddleocr',
     displayName: 'PaddleOCR',
     version: '1',
+    markdownOutput: true,
     supportedMimeTypes: PADDLEOCR_MIMES,
     requiresServiceConfig: true,
     capabilities: {
@@ -155,6 +163,7 @@ const DOCUMENT_EXTRACTOR_MANIFEST: Record<string, DocumentExtractorManifestEntry
     id: 'paddleocr-cloud',
     displayName: 'PaddleOCR (Cloud)',
     version: '1',
+    markdownOutput: true,
     supportedMimeTypes: PADDLE_CLOUD_MIMES,
     requiresServiceConfig: true,
     capabilities: {

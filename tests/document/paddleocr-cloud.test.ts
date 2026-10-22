@@ -209,26 +209,6 @@ describe('PaddleOCR Cloud (Baidu document parsing)', () => {
     ).toBe(1);
   });
 
-  it('resolves the AK/SK from the environment under allowEnvFallback', async () => {
-    vi.stubEnv('PADDLEOCR_CLOUD_ACCESS_KEY_ID', 'env-ak');
-    vi.stubEnv('PADDLEOCR_CLOUD_ACCESS_KEY_SECRET', 'env-sk');
-    installCloud();
-    const promise = parseWithPaddleCloud(
-      { providerId: 'paddleocr-cloud', allowEnvFallback: true },
-      Buffer.from('%PDF-doc'),
-      'lesson.pdf',
-    );
-    await vi.runAllTimersAsync();
-    const result = await promise;
-    expect(result.text).toBe('# 解析后的文档');
-    // The env-resolved pair made it all the way through submit and query.
-    const submit = transport.providerFetch.mock.calls.find(([u]) =>
-      String(u).includes('/paddle-vl-parser/task?'),
-    );
-    expect(String(submit?.[0])).toContain('access_token=tok-1');
-    vi.unstubAllEnvs();
-  });
-
   it('gives a managed cloud endpoint the operator policy, downloads stay strict', async () => {
     vi.stubEnv('ALLOW_LOCAL_NETWORKS', 'true');
     installCloud();
@@ -302,7 +282,7 @@ describe('PaddleOCR Cloud (Baidu document parsing)', () => {
     vi.stubGlobal('fetch', vi.fn());
 
     const promise = parseWithPaddleCloud(
-      { providerId: 'paddleocr-cloud', apiKey: 'k', model: 'm', signal: controller.signal },
+      { providerId: 'paddleocr-cloud', apiKey: 'k', signal: controller.signal },
       Buffer.from('a'),
       'a.pdf',
     );
@@ -319,6 +299,281 @@ describe('PaddleOCR Cloud (Baidu document parsing)', () => {
       String(u).includes('/task/query'),
     ).length;
     expect(queriesAfter).toBe(queriesBefore);
+  });
+
+  it('downloads storage-link images under the strict policy and preserves their paths', async () => {
+    vi.useFakeTimers();
+    const IMG_URL = 'https://93.184.216.34/images/fig1.png';
+    transport.providerFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/oauth/2.0/token')) {
+        return okJson({ access_token: 'tok-1', expires_in: 2592000 });
+      }
+      if (url.includes('/paddle-vl-parser/task?')) {
+        return okJson({ error_code: 0, result: { task_id: 'task-5' } });
+      }
+      if (url.includes('/task/query')) {
+        return okJson({
+          error_code: 0,
+          result: {
+            task_id: 'task-5',
+            status: 'success',
+            markdown_url: MARKDOWN_URL,
+            parse_result_url: PARSE_URL,
+          },
+        });
+      }
+      if (url === MARKDOWN_URL) {
+        return new Response('文档带图', { status: 200 });
+      }
+      if (url === PARSE_URL) {
+        return okJson({
+          pages: [
+            {
+              page_num: 0,
+              text: '文档带图',
+              images: [{ data_url: IMG_URL }],
+            },
+          ],
+        });
+      }
+      if (url === IMG_URL) {
+        return new Response(new Uint8Array([9, 9, 9]), { status: 200 });
+      }
+      throw new Error(`Unexpected transport URL: ${url}`);
+    });
+
+    const promise = parseWithPaddleCloud(CONFIG, Buffer.from('a'), 'a.pdf');
+    await vi.advanceTimersByTimeAsync(6_000);
+    const result = await promise;
+
+    // The linked figure was downloaded under the strict policy and inlined.
+    expect(result.images).toEqual(['data:image/png;base64,CQkJ']);
+    const imgMeta = result.metadata?.pdfImages?.[0];
+    expect(imgMeta).toMatchObject({ path: 'p1-img', pageNumber: 1 });
+    const imgCall = transport.providerFetch.mock.calls.find(([u]) => u === IMG_URL)!;
+    expect(imgCall[2]).toMatchObject({ allowLocalNetworks: false, requireHttps: true });
+  });
+
+  it('retries a submit refused by the QPS limit', async () => {
+    vi.useFakeTimers();
+    const qpsState: { asked?: boolean } = {};
+    transport.providerFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/oauth/2.0/token')) {
+        return okJson({ access_token: 'tok-1', expires_in: 2592000 });
+      }
+      if (url.includes('/paddle-vl-parser/task?')) {
+        if (!('asked' in qpsState)) {
+          qpsState.asked = true;
+          // First submit: Baidu QPS-limit error code.
+          return okJson({ error_code: 18, error_msg: 'QPS limit reached' });
+        }
+        return okJson({ error_code: 0, result: { task_id: 'task-6' } });
+      }
+      if (url.includes('/task/query')) {
+        return okJson({
+          error_code: 0,
+          result: {
+            task_id: 'task-6',
+            status: 'success',
+            markdown_url: MARKDOWN_URL,
+            parse_result_url: null,
+          },
+        });
+      }
+      return new Response('md', { status: 200 });
+    });
+    vi.stubGlobal('fetch', vi.fn());
+
+    const promise = parseWithPaddleCloud(CONFIG, Buffer.from('a'), 'a.pdf');
+    const expectation = expect(promise).resolves.toMatchObject({ text: 'md' });
+    await vi.runAllTimersAsync();
+    await expectation;
+    expect(
+      transport.providerFetch.mock.calls.filter(([u]) =>
+        String(u).includes('/paddle-vl-parser/task?'),
+      ).length,
+    ).toBe(2);
+  });
+
+  it('evicts the cached token when the submit reports it invalid', async () => {
+    vi.useFakeTimers();
+    transport.providerFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/oauth/2.0/token')) {
+        return okJson({ access_token: 'tok-fresh', expires_in: 2592000 });
+      }
+      if (url.includes('/paddle-vl-parser/task?')) {
+        const n = transport.providerFetch.mock.calls.filter(([u]) =>
+          String(u).includes('/paddle-vl-parser/task?'),
+        ).length;
+        if (n === 1) {
+          return okJson({ error_code: 110, error_msg: 'Access token invalid' });
+        }
+        return okJson({ error_code: 0, result: { task_id: 'task-7' } });
+      }
+      if (url.includes('/task/query')) {
+        return okJson({
+          error_code: 0,
+          result: {
+            task_id: 'task-7',
+            status: 'success',
+            markdown_url: MARKDOWN_URL,
+            parse_result_url: null,
+          },
+        });
+      }
+      return new Response('md', { status: 200 });
+    });
+    vi.stubGlobal('fetch', vi.fn());
+
+    const promise = parseWithPaddleCloud(CONFIG, Buffer.from('a'), 'a.pdf');
+    const expectation = expect(promise).resolves.toMatchObject({ text: 'md' });
+    await vi.runAllTimersAsync();
+    await expectation;
+    // The submit was retried after the token was evicted and reacquired.
+    const submits = transport.providerFetch.mock.calls.filter(([u]) =>
+      String(u).includes('/paddle-vl-parser/task?'),
+    );
+    expect(submits.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('caps linked-image count and skips null entries', async () => {
+    vi.useFakeTimers();
+    transport.providerFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/oauth/2.0/token')) {
+        return okJson({ access_token: 'tok-1', expires_in: 2592000 });
+      }
+      if (url.includes('/paddle-vl-parser/task?')) {
+        return okJson({ error_code: 0, result: { task_id: 'task-8' } });
+      }
+      if (url.includes('/task/query')) {
+        return okJson({
+          error_code: 0,
+          result: {
+            task_id: 'task-8',
+            status: 'success',
+            markdown_url: MARKDOWN_URL,
+            parse_result_url: PARSE_URL,
+          },
+        });
+      }
+      if (url === MARKDOWN_URL) return new Response('md', { status: 200 });
+      if (url === PARSE_URL) {
+        return okJson({
+          pages: [
+            null, // malformed page: skipped, not fatal
+            {
+              page_num: 1,
+              text: 'p2',
+              images: [null, { data_url: 'https://93.184.216.34/images/fig.png' }],
+            },
+          ],
+        });
+      }
+      if (url.startsWith('https://93.184.216.34/images/')) {
+        return new Response(new Uint8Array([1]), { status: 200 });
+      }
+      throw new Error(`Unexpected transport URL: ${url}`);
+    });
+
+    const promise = parseWithPaddleCloud(CONFIG, Buffer.from('a'), 'a.pdf');
+    await vi.advanceTimersByTimeAsync(6_000);
+    const result = await promise;
+    // The null page was skipped; the null image entry skipped within the page.
+    expect(result.images.length).toBe(1);
+    expect(result.metadata?.pageCount).toBe(2);
+  });
+
+  it('caps linked-image count and aggregate bytes', async () => {
+    vi.useFakeTimers();
+    const { MAX_IMAGE_LINKS } = await import('@/lib/pdf/paddleocr-cloud');
+    let fetched = 0;
+    transport.providerFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/oauth/2.0/token')) {
+        return okJson({ access_token: 'tok-1', expires_in: 2592000 });
+      }
+      if (url.includes('/paddle-vl-parser/task?')) {
+        return okJson({ error_code: 0, result: { task_id: 'task-9' } });
+      }
+      if (url.includes('/task/query')) {
+        return okJson({
+          error_code: 0,
+          result: {
+            task_id: 'task-9',
+            status: 'success',
+            markdown_url: MARKDOWN_URL,
+            parse_result_url: PARSE_URL,
+          },
+        });
+      }
+      if (url === MARKDOWN_URL) return new Response('md', { status: 200 });
+      if (url.startsWith('https://93.184.216.34/images/')) {
+        fetched += 1;
+        // Over-budget payload: exercises the per-image budget too.
+        return new Response(new Uint8Array([1]), { status: 200 });
+      }
+      if (url === PARSE_URL) {
+        return okJson({
+          // parse_result lists more links than the cap; the slice bounds it.
+          pages: Array.from({ length: MAX_IMAGE_LINKS + 10 }, (_, i) => ({
+            page_num: i,
+            text: `p${i}`,
+            images: [{ data_url: `https://93.184.216.34/images/${i}.png` }],
+          })),
+        });
+      }
+      throw new Error(`Unexpected transport URL: ${url}`);
+    });
+
+    const promise = parseWithPaddleCloud(CONFIG, Buffer.from('a'), 'a.pdf');
+    await vi.advanceTimersByTimeAsync(6_000);
+    const result = await promise;
+    // Exactly MAX_IMAGE_LINKS figures were fetched (the count cap), and no
+    // more: the slice bounds the download loop.
+    expect(fetched).toBe(MAX_IMAGE_LINKS);
+    expect(result.images.length).toBe(MAX_IMAGE_LINKS);
+  });
+
+  it('skips a linked image whose download fails and keeps the markdown', async () => {
+    vi.useFakeTimers();
+    transport.providerFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/oauth/2.0/token')) {
+        return okJson({ access_token: 'tok-1', expires_in: 2592000 });
+      }
+      if (url.includes('/paddle-vl-parser/task?')) {
+        return okJson({ error_code: 0, result: { task_id: 'task-10' } });
+      }
+      if (url.includes('/task/query')) {
+        return okJson({
+          error_code: 0,
+          result: {
+            task_id: 'task-10',
+            status: 'success',
+            markdown_url: MARKDOWN_URL,
+            parse_result_url: PARSE_URL,
+          },
+        });
+      }
+      if (url === MARKDOWN_URL) return new Response('md', { status: 200 });
+      if (url === PARSE_URL) {
+        return okJson({
+          pages: [
+            {
+              page_num: 0,
+              text: 'x',
+              images: [{ data_url: 'https://93.184.216.34/images/dead.png' }],
+            },
+          ],
+        });
+      }
+      // Image link: transport failure (DNS/reset).
+      throw new Error('ECONNRESET');
+    });
+
+    const promise = parseWithPaddleCloud(CONFIG, Buffer.from('a'), 'a.pdf');
+    await vi.advanceTimersByTimeAsync(6_000);
+    const result = await promise;
+    expect(result.text).toBe('md');
+    expect(result.images).toEqual([]);
   });
 
   it('requires the AK/SK pair before any network call', async () => {

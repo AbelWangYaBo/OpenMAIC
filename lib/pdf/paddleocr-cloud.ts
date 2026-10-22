@@ -41,6 +41,12 @@ const DOWNLOAD_TIMEOUT_MS = 120_000;
 export const MAX_FILE_DATA_BYTES = 50 * 1024 * 1024;
 export const MAX_JSON_BYTES = 16 * 1024 * 1024;
 export const MAX_MARKDOWN_BYTES = 32 * 1024 * 1024;
+/** Caps for response-supplied image links (count + aggregate bytes). */
+export const MAX_IMAGE_LINKS = 100;
+export const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
+export const MAX_IMAGE_LINK_BYTES_TOTAL = 32 * 1024 * 1024;
+/** Aggregate wall-clock bound for the whole linked-image phase. */
+export const IMAGE_PHASE_MAX_MS = 5 * 60_000;
 
 /** The strict public policy: result URLs are response-supplied, never ours,
  * and HTTPS-only on every hop — the payloads carry the parsed document. */
@@ -102,7 +108,11 @@ async function getAccessToken(
 
   const response = await providerFetch(
     `${baseUrl}/oauth/2.0/token?grant_type=client_credentials&client_id=${encodeURIComponent(accessKeyId)}&client_secret=${encodeURIComponent(accessKeySecret)}`,
-    { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, signal },
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      signal: requestSignal(SUBMIT_TIMEOUT_MS, signal),
+    },
     apiRootPolicy(managed),
   );
   const body = (await response.json().catch(() => null)) as {
@@ -209,20 +219,156 @@ async function downloadResponseUrl(
   return new TextDecoder().decode(out);
 }
 
+/**
+ * Download one response-supplied image link under the strict HTTPS-only
+ * bounded policy and return it as a data URL, or null when the link is
+ * refused, fails, or exceeds the image byte budget (per-image and aggregate).
+ * Caller aborts and policy rejections propagate.
+ */
+/**
+ * Read a response body with an ordered budget: [perBodyMax, aggregateRemaining].
+ * Returns the bytes, or the first budget number that was exceeded (the stream
+ * is cancelled at that point, never buffered past it).
+ */
+async function readBodyWithBudget(
+  response: Response,
+  budgets: readonly number[],
+): Promise<Uint8Array | number> {
+  const declared = Number(response.headers.get('content-length'));
+  const hardMax = Math.max(...budgets);
+  if (Number.isFinite(declared) && declared > hardMax) {
+    await response.body?.cancel().catch(() => {});
+    return hardMax;
+  }
+  if (!response.body) {
+    const buf = await response.arrayBuffer();
+    if (buf.byteLength > hardMax) return buf.byteLength;
+    return new Uint8Array(buf);
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let exceeded: number | undefined;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      const hit = budgets.find((b) => total > b);
+      if (hit !== undefined) {
+        exceeded = hit;
+        break;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    if (exceeded !== undefined) await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+  if (exceeded !== undefined) return exceeded;
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+/**
+ * The image MIME for a data URL: a validated response Content-Type wins;
+ * otherwise sniff the bytes (PNG/JPEG/WebP) and fall back to image/png.
+ */
+function resolveImageMime(contentType: string | null, bytes: Uint8Array): string {
+  const declared = contentType?.split(';')[0]?.trim().toLowerCase();
+  if (
+    declared &&
+    ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp'].includes(declared)
+  ) {
+    return declared;
+  }
+  if (
+    bytes.length > 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  ) {
+    return 'image/png';
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) return 'image/jpeg';
+  if (
+    bytes.length > 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return 'image/webp';
+  }
+  return 'image/png';
+}
+
+async function downloadLinkImage(
+  parsed: ParsedPdfContent,
+  link: { path: string; url: string; pageNumber: number },
+  ctx: {
+    config: PDFParserConfig;
+    signal?: AbortSignal;
+    linkBytesTotal: () => number;
+    addBytes: (n: number) => void;
+  },
+): Promise<string | null> {
+  const ssrfError = await validateUrlForSSRFWithPolicy(link.url, { allowLocalNetworks: false });
+  if (ssrfError || !link.url.startsWith('https://')) {
+    log.warn(`[PaddleCloud] image link for "${link.path}" refused by policy, skipped`);
+    return null;
+  }
+  let response: Response;
+  try {
+    response = await providerFetch(
+      link.url,
+      { signal: requestSignal(DOWNLOAD_TIMEOUT_MS, ctx.signal) },
+      RESPONSE_URL_POLICY,
+    );
+  } catch (error) {
+    if (ctx.signal?.aborted || isRejectedRedirectError(error)) throw error;
+    log.warn(`[PaddleCloud] image download for "${link.path}" failed, skipped:`, error);
+    return null;
+  }
+  if (!response.ok) {
+    log.warn(
+      `[PaddleCloud] image download for "${link.path}" failed (${response.status}), skipped`,
+    );
+    return null;
+  }
+  const streamed = await readBodyWithBudget(response, [
+    MAX_IMAGE_BYTES,
+    MAX_IMAGE_LINK_BYTES_TOTAL - ctx.linkBytesTotal(),
+  ]);
+  if (typeof streamed === 'number') {
+    log.warn(
+      `[PaddleCloud] image for "${link.path}" exceeds the image byte budget (${streamed} bytes), skipped`,
+    );
+    return null;
+  }
+  ctx.addBytes(streamed.byteLength);
+  const mime = resolveImageMime(response.headers.get('content-type'), streamed);
+  return `data:${mime};base64,${Buffer.from(streamed).toString('base64')}`;
+}
+
 export async function parseWithPaddleCloud(
   config: PDFParserConfig,
   documentBuffer: Buffer,
   sourceFileName?: string,
 ): Promise<ParsedPdfContent> {
-  // Under the opt-in, the pair can live in the environment (the same fallback
-  // the parsePDF precheck honors); resolve it here so every caller sees the
-  // resolved credentials.
-  const accessKeyId =
-    config.accessKeyId ||
-    (config.allowEnvFallback ? process.env.PADDLEOCR_CLOUD_ACCESS_KEY_ID : undefined);
-  const accessKeySecret =
-    config.accessKeySecret ||
-    (config.allowEnvFallback ? process.env.PADDLEOCR_CLOUD_ACCESS_KEY_SECRET : undefined);
+  const accessKeyId = config.accessKeyId;
+  const accessKeySecret = config.accessKeySecret;
   if (!accessKeyId || !accessKeySecret) {
     throw new Error('PaddleOCR Cloud requires an API Key and Secret Key pair');
   }
@@ -233,39 +379,95 @@ export async function parseWithPaddleCloud(
   }
 
   const baseUrl = (config.baseUrl || PADDLE_CLOUD_DEFAULT_BASE).replace(/\/+$/, '');
+  // Baidu identifies the upload by the file_name extension; a missing or
+  // extension-less name falls back to the configured MIME type.
   const fileName = sourceFileName || 'document.pdf';
-  const token = await getAccessToken(
+  if (documentBuffer.byteLength > MAX_FILE_DATA_BYTES) {
+    throw new Error('Document exceeds the 50 MB file_data limit of PaddleOCR Cloud');
+  }
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve, reject) => {
+      if (config.signal?.aborted) {
+        reject(config.signal.reason ?? new DOMException('Aborted', 'AbortError'));
+        return;
+      }
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(config.signal!.reason ?? new DOMException('Aborted', 'AbortError'));
+      };
+      const timer = setTimeout(() => {
+        config.signal?.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      config.signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  // Step 1: submit the document as base64 form data.
+  log.info(`[PaddleCloud] Submitting ${fileName} (${documentBuffer.byteLength} bytes)`);
+
+  // The submit API is rate-limited to 2 QPS: a QPS refusal (HTTP 429 or
+  // Baidu code 18) is retried with backoff. An invalid/expired token (codes
+  // 110/111) evicts the cache entry so the retry reacquires a fresh one.
+  let token = await getAccessToken(
     baseUrl,
     accessKeyId,
     accessKeySecret,
     config.managed,
     config.signal,
   );
-
-  // Step 1: submit the document as base64 form data.
+  let tokenRefreshNeeded = false;
   const submitBody = new URLSearchParams({
     file_data: documentBuffer.toString('base64'),
     file_name: fileName,
   }).toString();
-
-  log.info(`[PaddleCloud] Submitting ${fileName} (${documentBuffer.byteLength} bytes)`);
-
-  const submitResponse = await providerFetch(
-    `${baseUrl}${SUBMIT_PATH}?access_token=${encodeURIComponent(token)}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: submitBody,
-      signal: requestSignal(SUBMIT_TIMEOUT_MS, config.signal),
-    },
-    apiRootPolicy(config.managed),
-  );
-  const submitJson = (await submitResponse.json().catch(() => null)) as SubmitResponse | null;
-  if (!submitResponse.ok || !submitJson || (submitJson.error_code ?? 0) !== 0) {
-    const msg = submitJson?.error_msg || `HTTP ${submitResponse.status}`;
-    throw new Error(`PaddleOCR Cloud submit failed: ${msg}`);
+  let submitJson: SubmitResponse | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      await sleep(2_000);
+      if (tokenRefreshNeeded) {
+        token = await getAccessToken(
+          baseUrl,
+          accessKeyId,
+          accessKeySecret,
+          config.managed,
+          config.signal,
+        );
+        tokenRefreshNeeded = false;
+      }
+    }
+    const submitResponse = await providerFetch(
+      `${baseUrl}${SUBMIT_PATH}?access_token=${encodeURIComponent(token)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: submitBody,
+        signal: requestSignal(SUBMIT_TIMEOUT_MS, config.signal),
+      },
+      apiRootPolicy(config.managed),
+    );
+    submitJson = (await submitResponse.json().catch(() => null)) as SubmitResponse | null;
+    const code = submitJson?.error_code;
+    if (submitResponse.status === 429 || code === 18) {
+      continue; // QPS refusal: backoff and retry
+    }
+    if (!submitResponse.ok) {
+      throw new Error(`PaddleOCR Cloud submit failed (HTTP ${submitResponse.status})`);
+    }
+    if (code === 110 || code === 111) {
+      tokenCache.delete(cacheKey(baseUrl, accessKeyId, accessKeySecret));
+      tokenRefreshNeeded = true;
+      continue; // reacquire the token and retry once within the attempt budget
+    }
+    if (!submitJson || (code ?? 0) !== 0) {
+      throw new Error(`PaddleOCR Cloud submit failed: ${submitJson?.error_msg || `code ${code}`}`);
+    }
+    break;
   }
-  const taskId = submitJson.result?.task_id;
+  if (!submitJson || (submitJson.error_code ?? 0) !== 0 || !submitJson.result?.task_id) {
+    throw new Error(
+      `PaddleOCR Cloud submit failed: ${submitJson?.error_msg || 'no task_id returned'}`,
+    );
+  }
+  const taskId = submitJson.result.task_id;
   if (typeof taskId !== 'string' || !taskId) {
     throw new Error('PaddleOCR Cloud submit returned no task_id');
   }
@@ -273,22 +475,6 @@ export async function parseWithPaddleCloud(
   // Step 2: poll the query endpoint (5-10s cadence per the API docs).
   const deadline = Date.now() + POLL_MAX_MS;
   let result: NonNullable<QueryResponse['result']> | null = null;
-  const sleep = (ms: number) =>
-    new Promise<void>((resolve, reject) => {
-      if (config.signal?.aborted) {
-        reject(config.signal.reason ?? new DOMException('Aborted', 'AbortError'));
-        return;
-      }
-      const timer = setTimeout(resolve, ms);
-      config.signal?.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          reject(config.signal!.reason ?? new DOMException('Aborted', 'AbortError'));
-        },
-        { once: true },
-      );
-    });
   while (Date.now() < deadline) {
     await sleep(POLL_INTERVAL_MS);
     const queryResponse = await providerFetch(
@@ -301,11 +487,24 @@ export async function parseWithPaddleCloud(
       },
       apiRootPolicy(config.managed),
     );
+    // The query API is rate-limited to 5 QPS: an HTTP 429 is transient and
+    // must be handled before the generic !ok branch (which material-extraction
+    // classifies as permanent).
+    if (queryResponse.status === 429) continue;
+    // Other HTTP-level failures surface immediately instead of being read as
+    // a provider status.
+    if (!queryResponse.ok) {
+      throw new Error(`PaddleOCR Cloud query failed (HTTP ${queryResponse.status})`);
+    }
     const queryJson = (await queryResponse.json().catch(() => null)) as QueryResponse | null;
-    if (!queryJson || (queryJson.error_code ?? 0) !== 0) {
-      const code = queryJson?.error_code;
-      // A missing task right after submission is transient; other codes are not.
-      if (code === 282007) continue;
+    const code = queryJson?.error_code;
+    if (!queryJson || (code ?? 0) !== 0) {
+      // Baidu QPS-limit responses are transient (query API: 5 QPS).
+      if (code === 18 || queryResponse.status === 429) continue;
+      // An invalid/expired token invalidates the cache; the caller retries.
+      if (code === 110 || code === 111) {
+        tokenCache.delete(cacheKey(baseUrl, accessKeyId, accessKeySecret));
+      }
       throw new Error(`PaddleOCR Cloud query failed: ${queryJson?.error_msg || `code ${code}`}`);
     }
     const current = queryJson.result ?? null;
@@ -353,5 +552,45 @@ export async function parseWithPaddleCloud(
     }
   }
 
-  return extractPaddleCloudParseResult(parseResult, markdown);
+  const parsed = extractPaddleCloudParseResult(parseResult, markdown);
+
+  // Cloud images can be storage links: download each under the same strict,
+  // bounded policy as the result URLs before the result is published, so
+  // signed links cannot expire into broken markdown references.
+  const imageLinks = parsed.metadata?.imageLinks as
+    | Array<{ path: string; url: string; pageNumber: number }>
+    | undefined;
+  // A figure-heavy result or a custom gateway can list many links: cap the
+  // count and the aggregate retained bytes so even individually capped
+  // bodies cannot grow the process without bound. Caller aborts and policy
+  // rejections propagate; an ordinary failure only skips that figure.
+  let linkBytesTotal = 0;
+  // The whole image phase gets one aggregate deadline: serial awaits with
+  // per-request timeouts are additive, and /api/parse-pdf builds this config
+  // without a caller signal to bound them.
+  const phaseSignal = AbortSignal.any([
+    ...(config.signal ? [config.signal] : []),
+    AbortSignal.timeout(IMAGE_PHASE_MAX_MS),
+  ]);
+  for (const link of (imageLinks ?? []).slice(0, MAX_IMAGE_LINKS)) {
+    const dataUrl = await downloadLinkImage(parsed, link, {
+      config,
+      signal: phaseSignal,
+      linkBytesTotal: () => linkBytesTotal,
+      addBytes: (n) => (linkBytesTotal += n),
+    });
+    if (dataUrl) {
+      parsed.images.push(dataUrl);
+      const id = `img_${parsed.images.length}`;
+      parsed.metadata?.pdfImages?.push({
+        id,
+        src: dataUrl,
+        pageNumber: link.pageNumber,
+        path: link.path,
+      });
+      if (parsed.metadata?.imageMapping) parsed.metadata.imageMapping[id] = dataUrl;
+    }
+  }
+
+  return parsed;
 }

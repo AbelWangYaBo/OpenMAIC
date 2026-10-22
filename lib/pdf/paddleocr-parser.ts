@@ -12,9 +12,21 @@ import { createLogger } from '@/lib/logger';
 
 const log = createLogger('PaddleOCRParser');
 
-function toDataUrl(value: unknown): string | null {
+/**
+ * A Baidu image value can be an inline data URL or a storage link (the API
+ * documents `data_url` as a link despite the name). Returns the entry as-is
+ * for data URLs; links are surfaced with their URL so the caller downloads
+ * them under the result-download policy.
+ */
+function classifyImageValue(
+  value: unknown,
+): { kind: 'data'; src: string } | { kind: 'link'; url: string } | null {
   if (typeof value !== 'string' || !value.trim()) return null;
-  return value.startsWith('data:') ? value : `data:image/png;base64,${value}`;
+  if (value.startsWith('data:')) return { kind: 'data', src: value };
+  if (value.startsWith('http://') || value.startsWith('https://')) {
+    return { kind: 'link', url: value };
+  }
+  return { kind: 'data', src: `data:image/png;base64,${value}` };
 }
 
 /**
@@ -68,6 +80,7 @@ export function extractPaddleLayoutParsing(
   const results = Array.isArray(layoutParsingResults) ? layoutParsingResults : [];
   const textParts: string[] = [];
   const images: Array<{ path: string; src: string; pageNumber: number }> = [];
+  const linkUrls: Array<{ path: string; url: string; pageNumber: number }> = [];
 
   results.forEach((entry, pageIndex) => {
     const markdown = (entry as Record<string, unknown>)?.markdown as
@@ -78,13 +91,24 @@ export function extractPaddleLayoutParsing(
     }
     if (markdown?.images && typeof markdown.images === 'object') {
       for (const [path, value] of Object.entries(markdown.images as Record<string, unknown>)) {
-        const src = toDataUrl(value);
-        if (src) images.push({ path, src, pageNumber: pageIndex + 1 });
+        const classified = classifyImageValue(value);
+        if (classified?.kind === 'data') {
+          images.push({ path, src: classified.src, pageNumber: pageIndex + 1 });
+        } else if (classified?.kind === 'link') {
+          // The caller (pdf-providers / extractor) downloads links under the
+          // result-download policy; recorded here with the URL in `src`.
+          linkUrls.push({ path, url: classified.url, pageNumber: pageIndex + 1 });
+        }
       }
     }
   });
 
-  return buildResult(textParts.join('\n\n'), images, results.length, parser);
+  const parsed = buildResult(textParts.join('\n\n'), images, results.length, parser);
+  if (linkUrls.length > 0) {
+    parsed.metadata!.imageLinks = linkUrls.map((l) => ({ ...l, src: l.url }));
+    log.info(`[PaddleOCR] ${linkUrls.length} image(s) are storage links, queued for download`);
+  }
+  return parsed;
 }
 
 /**
@@ -99,19 +123,35 @@ export function extractPaddleCloudParseResult(
   const pages = (parseResult as { pages?: unknown })?.pages;
   const pageList = Array.isArray(pages) ? (pages as Record<string, unknown>[]) : [];
   const images: Array<{ path: string; src: string; pageNumber: number }> = [];
+  const imageLinks: Array<{ path: string; url: string; pageNumber: number }> = [];
 
   pageList.forEach((page, index) => {
+    if (page == null || typeof page !== 'object') return;
     const pageImages = Array.isArray(page.images) ? page.images : [];
-    for (const image of pageImages as Record<string, unknown>[]) {
-      const src = toDataUrl(image.data_url);
-      if (src)
+    for (const image of pageImages) {
+      if (image == null || typeof image !== 'object') continue;
+      const classified = classifyImageValue((image as Record<string, unknown>).data_url);
+      if (classified?.kind === 'data') {
         images.push({
           path: String(image.layout_id ?? `p${index + 1}-img`),
-          src,
+          src: classified.src,
           pageNumber: index + 1,
         });
+      } else if (classified?.kind === 'link') {
+        imageLinks.push({
+          path: String(image.layout_id ?? `p${index + 1}-img`),
+          url: classified.url,
+          pageNumber: index + 1,
+        });
+      }
     }
   });
 
-  return buildResult(markdown, images, pageList.length, 'paddleocr-cloud');
+  const parsed = buildResult(markdown, images, pageList.length, 'paddleocr-cloud');
+  if (imageLinks.length > 0) {
+    // Surfaced for the caller to download under the result-download policy;
+    // `buildResult` did not count them as inline assets.
+    (parsed.metadata as { imageLinks?: unknown }).imageLinks = imageLinks;
+  }
+  return parsed;
 }

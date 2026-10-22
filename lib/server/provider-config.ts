@@ -121,8 +121,6 @@ const PDF_ENV_MAP: Record<string, string> = {
   PDF_UNPDF: 'unpdf',
   PDF_MINERU: 'mineru',
   PDF_MINERU_CLOUD: 'mineru-cloud',
-  PDF_PADDLEOCR: 'paddleocr',
-  PDF_PADDLEOCR_CLOUD: 'paddleocr-cloud',
 };
 
 const IMAGE_ENV_MAP: Record<string, string> = {
@@ -381,30 +379,24 @@ const BEDROCK_PROVIDER_ID = 'bedrock';
 const _configs: Map<string, ServerConfig> = new Map();
 
 /**
- * Providers whose server configuration is an AK/SK pair rather than a single
- * apiKey (AliDocMind, PaddleOCR Cloud) are server-configured when the pair is
- * provided via env or YAML, so they need their own fallback rather than
- * PDF_ENV_MAP's apiKey shape.
+ * AliDocMind is server-configured when AK/SK are provided via env
+ * (ALIDOCMIND_ACCESS_KEY_ID/SECRET) or YAML. It uses AK/SK rather than a single
+ * apiKey, so it needs its own fallback rather than PDF_ENV_MAP's apiKey shape.
  */
-function applyAKSKFallback(
+function applyAliDocMindFallback(
   pdfConfig: Record<string, ServerProviderEntry>,
   yamlPdfSection: Record<string, Partial<ServerProviderEntry>> | undefined,
-  providerId: string,
-  keyIdEnv: string,
-  keySecretEnv: string,
-  baseUrlEnv: string,
 ): Record<string, ServerProviderEntry> {
-  const yamlEntry = yamlPdfSection?.[providerId];
-  const accessKeyId = process.env[keyIdEnv] || yamlEntry?.accessKeyId;
-  const accessKeySecret = process.env[keySecretEnv] || yamlEntry?.accessKeySecret;
+  const yamlEntry = yamlPdfSection?.[ALIDOCMIND_PROVIDER_ID];
+  const accessKeyId = process.env.ALIDOCMIND_ACCESS_KEY_ID || yamlEntry?.accessKeyId;
+  const accessKeySecret = process.env.ALIDOCMIND_ACCESS_KEY_SECRET || yamlEntry?.accessKeySecret;
   if (!accessKeyId || !accessKeySecret) {
-    // These providers can only be server-managed with an AK/SK pair. The
-    // generic loader may have created a bare entry from a YAML `baseUrl`
-    // alone — drop it so the provider stays UNMANAGED (clients supply their
-    // own creds) rather than "managed" with no usable credentials, which
-    // would both lock the provider out and silently discard client-entered
-    // AK/SK.
-    delete pdfConfig[providerId];
+    // AliDocMind can only be server-managed with an AK/SK pair. The generic
+    // loader may have created a bare entry from a YAML `baseUrl` alone — drop
+    // it so the provider stays UNMANAGED (clients supply their own creds)
+    // rather than "managed" with no usable credentials, which would both lock
+    // the provider out and silently discard client-entered AK/SK.
+    delete pdfConfig[ALIDOCMIND_PROVIDER_ID];
     return pdfConfig;
   }
 
@@ -412,46 +404,17 @@ function applyAKSKFallback(
   // That loader copies only apiKey/baseUrl/models/proxy — never AK/SK — and a
   // YAML entry with a `baseUrl` makes it create the entry, so returning early
   // here would leave a "managed" provider with no usable credentials.
-  const existing = pdfConfig[providerId];
-  pdfConfig[providerId] = {
+  const existing = pdfConfig[ALIDOCMIND_PROVIDER_ID];
+  pdfConfig[ALIDOCMIND_PROVIDER_ID] = {
     apiKey: existing?.apiKey ?? '',
     accessKeyId,
     accessKeySecret,
-    baseUrl: existing?.baseUrl || yamlEntry?.baseUrl || process.env[baseUrlEnv] || undefined,
+    baseUrl:
+      existing?.baseUrl || yamlEntry?.baseUrl || process.env.ALIDOCMIND_BASE_URL || undefined,
     models: existing?.models,
     proxy: existing?.proxy,
   };
   return pdfConfig;
-}
-
-function applyAliDocMindFallback(
-  pdfConfig: Record<string, ServerProviderEntry>,
-  yamlPdfSection: Record<string, Partial<ServerProviderEntry>> | undefined,
-): Record<string, ServerProviderEntry> {
-  return applyAKSKFallback(
-    pdfConfig,
-    yamlPdfSection,
-    ALIDOCMIND_PROVIDER_ID,
-    'ALIDOCMIND_ACCESS_KEY_ID',
-    'ALIDOCMIND_ACCESS_KEY_SECRET',
-    'ALIDOCMIND_BASE_URL',
-  );
-}
-
-const PADDLE_CLOUD_PROVIDER_ID = 'paddleocr-cloud';
-
-function applyPaddleCloudFallback(
-  pdfConfig: Record<string, ServerProviderEntry>,
-  yamlPdfSection: Record<string, Partial<ServerProviderEntry>> | undefined,
-): Record<string, ServerProviderEntry> {
-  return applyAKSKFallback(
-    pdfConfig,
-    yamlPdfSection,
-    PADDLE_CLOUD_PROVIDER_ID,
-    'PADDLEOCR_CLOUD_ACCESS_KEY_ID',
-    'PADDLEOCR_CLOUD_ACCESS_KEY_SECRET',
-    'PADDLEOCR_CLOUD_BASE_URL',
-  );
 }
 
 /**
@@ -603,14 +566,11 @@ function buildConfig(yamlData: YamlData): ServerConfig {
     asr: loadEnvSection(ASR_ENV_MAP, yamlData.asr, {
       keylessProviders: new Set(['funasr-asr', 'lemonade-asr']),
     }),
-    pdf: applyPaddleCloudFallback(
-      applyAliDocMindFallback(
-        loadEnvSection(PDF_ENV_MAP, yamlData.pdf, {
-          requiresBaseUrl: true,
-          baseUrlOptionalProviders: new Set(['mineru-cloud', 'paddleocr-cloud']),
-        }),
-        yamlData.pdf,
-      ),
+    pdf: applyAliDocMindFallback(
+      loadEnvSection(PDF_ENV_MAP, yamlData.pdf, {
+        requiresBaseUrl: true,
+        baseUrlOptionalProviders: new Set(['mineru-cloud']),
+      }),
       yamlData.pdf,
     ),
     image,

@@ -188,7 +188,6 @@ const TEMPORARY_VENDOR_DEBT: readonly AllowedVendorDebt[] = [
       ['tencent', 4],
       ['hunyuan', 3],
       ['xiaomi', 3],
-      ['paddleocr', 9],
       ['tokendance', 2],
       ['ollama', 3],
       ['lemonade', 12],
@@ -216,7 +215,7 @@ const TEMPORARY_VENDOR_DEBT: readonly AllowedVendorDebt[] = [
       ['browser-native-tts', 2],
       ['browser-native', 3],
       ['comfyui', 2],
-      ['alidocmind', 11],
+      ['alidocmind', 14],
     ],
   ),
   ...groupedDebt(

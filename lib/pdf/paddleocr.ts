@@ -36,6 +36,19 @@ function selfHostedPaddlePolicy(managed: boolean | undefined): ProviderFetchPoli
   return { allowLocalNetworks: managed ? true : undefined, rejectRedirects: true };
 }
 
+const PADDLE_REQUEST_TIMEOUT_MS = 120_000;
+
+class PADDLE_NO_MARKDOWN extends Error {
+  constructor() {
+    super('PaddleOCR returned results without markdown; unsupported pipeline');
+    this.name = 'PaddleNoMarkdownError';
+  }
+}
+
+function requestSignal(timeoutMs: number, signal?: AbortSignal): AbortSignal {
+  return AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])]);
+}
+
 export async function parseWithPaddleOCR(
   config: PDFParserConfig,
   pdfBuffer: Buffer,
@@ -64,15 +77,25 @@ export async function parseWithPaddleOCR(
           file: pdfBuffer.toString('base64'),
           // 0 = PDF, 1 = image (PaddleX's own contract).
           fileType: options?.mimeType && options.mimeType !== 'application/pdf' ? 1 : 0,
+          // Visualization images are debug overlays; skipping them keeps the
+          // response small (documented for PP-StructureV3 / PaddleOCR-VL).
+          visualize: false,
         }),
-        signal: config.signal,
+        signal: requestSignal(PADDLE_REQUEST_TIMEOUT_MS, config.signal),
       },
       selfHostedPaddlePolicy(config.managed),
     );
   } catch (error) {
     if (isRejectedRedirectError(error)) throw error;
     log.error('[PaddleOCR] Request to the self-hosted server failed:', error);
-    throw new Error(PADDLEOCR_CONNECTION_FAILED, { cause: error });
+    const wrapped = new Error(PADDLEOCR_CONNECTION_FAILED, { cause: error });
+    // The owner worker's retry classifier reads the top-level code/name:
+    // preserve the transient signal (ECONNRESET, AbortError, ...) through
+    // the friendly wrapper so a temporary outage stays retryable.
+    const source = error as { code?: unknown; name?: unknown };
+    if (typeof source.code === 'string') (wrapped as { code?: unknown }).code = source.code;
+    if (source.name === 'AbortError') wrapped.name = 'AbortError';
+    throw wrapped;
   }
 
   if (!response.ok) {
@@ -102,6 +125,11 @@ export async function parseWithPaddleOCR(
   const results = json.result?.layoutParsingResults;
   if (!Array.isArray(results) || results.length === 0) {
     throw new Error('PaddleOCR returned no results');
+  }
+  // The layout-parsing pipelines that document parsing runs on always include
+  // the markdown field; a result without it means an unexpected pipeline.
+  if (results.some((r) => !(r as { markdown?: unknown })?.markdown)) {
+    throw new PADDLE_NO_MARKDOWN();
   }
 
   return extractPaddleLayoutParsing(results);

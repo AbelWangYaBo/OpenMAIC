@@ -139,12 +139,13 @@
 
 import { extractText, getDocumentProxy, extractImages } from 'unpdf';
 import sharp from 'sharp';
-import type { PDFParserConfig, PDFProviderId } from './types';
+import type { PDFParserConfig } from './types';
 import type { ParsedPdfContent } from '@/lib/types/pdf';
 import { PDF_PROVIDERS } from './constants';
 import { createLogger } from '@/lib/logger';
 import { parseWithPaddleOCR } from './paddleocr';
 import { parseWithPaddleCloud } from './paddleocr-cloud';
+import { getExtensionsForMimes } from '@/lib/document/mime';
 import { extractMinerUResult } from './mineru-parser';
 import { parseWithMinerUCloud } from './mineru-cloud';
 import { parseWithAliDocMindClient } from './alidocmind-client';
@@ -220,18 +221,19 @@ export async function parsePDF(
   }
 
   // Validate credentials if required. AliDocMind and PaddleOCR Cloud use
-  // AK/SK pairs rather than a single apiKey, each with its own env fallback.
-  const AKSK_ENV_FALLBACK: Partial<Record<PDFProviderId, string>> = {
-    alidocmind: 'ALIDOCMIND_ACCESS_KEY_ID',
-    'paddleocr-cloud': 'PADDLEOCR_CLOUD_ACCESS_KEY_ID',
-  };
-  const envFallbackId = AKSK_ENV_FALLBACK[config.providerId];
-  if (provider.requiresApiKey && !config.apiKey && !envFallbackId) {
+  // AK/SK pairs configured through openmaic.yml `credentials` (or client
+  // BYOK) rather than a single apiKey. AliDocMind additionally honors its
+  // legacy env fallback; PaddleOCR Cloud has none — pair it in YAML.
+  const usesKeyPair = config.providerId === 'alidocmind' || config.providerId === 'paddleocr-cloud';
+  if (provider.requiresApiKey && !usesKeyPair && !config.apiKey) {
     throw new Error(`API key required for PDF provider: ${config.providerId}`);
   }
-  if (envFallbackId && !config.accessKeyId) {
-    const envAvailable = config.allowEnvFallback && !!process.env[envFallbackId];
-    if (!envAvailable) {
+  if (usesKeyPair && !config.accessKeyId) {
+    const envAvailable =
+      config.providerId === 'alidocmind' &&
+      config.allowEnvFallback &&
+      !!process.env.ALIDOCMIND_ACCESS_KEY_ID;
+    if (!config.accessKeyId && !envAvailable) {
       throw new Error(`API key required for PDF provider: ${config.providerId}`);
     }
   }
@@ -261,9 +263,16 @@ export async function parsePDF(
       result = await parseWithPaddleOCR(config, pdfBuffer, { mimeType: options?.mimeType });
       break;
 
-    case 'paddleocr-cloud':
-      result = await parseWithPaddleCloud(config, pdfBuffer, options?.fileName);
+    case 'paddleocr-cloud': {
+      // Baidu identifies the upload by the file_name extension.
+      let cloudName = options?.fileName;
+      if (cloudName && !cloudName.includes('.') && options?.mimeType) {
+        const ext = getExtensionsForMimes([options.mimeType])[0];
+        if (ext) cloudName = `${cloudName}.${ext}`;
+      }
+      result = await parseWithPaddleCloud(config, pdfBuffer, cloudName);
       break;
+    }
 
     default:
       throw new Error(`Unsupported PDF provider: ${config.providerId}`);
