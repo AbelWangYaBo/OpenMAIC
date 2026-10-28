@@ -234,6 +234,12 @@ export interface ASRProviderConfig {
   supportedLanguages: string[];
   supportedFormats: string[];
   /**
+   * The request path under `defaultBaseUrl` the provider posts to, shown in
+   * the settings request-URL hint. Omitted when there is no single fixed
+   * path.
+   */
+  endpointPath?: string;
+  /**
    * The maximum ASR chunk duration (seconds) for server-side material
    * extraction. Providers without a limit omit this and use the generic
    * default. A provider whose input cap is a base64-encoded payload (e.g.

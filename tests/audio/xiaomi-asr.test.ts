@@ -150,3 +150,12 @@ describe('mediaASRChunkSec', () => {
     expect(mediaChunkWindows(600, mediaASRChunkSec('xiaomi-asr')).length).toBe(4);
   });
 });
+
+describe('Xiaomi MiMo ASR provider metadata', () => {
+  it('advertises the request path the adapter actually posts to', async () => {
+    // The settings request-URL hint renders defaultBaseUrl + endpointPath;
+    // it must match what transcribeXiaomiASR really calls.
+    const { ASR_PROVIDERS } = await import('@/lib/audio/constants');
+    expect(ASR_PROVIDERS['xiaomi-asr'].endpointPath).toBe('/chat/completions');
+  });
+});

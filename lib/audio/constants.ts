@@ -1611,6 +1611,8 @@ export const ASR_PROVIDERS: Record<BuiltInASRProviderId, ASRProviderConfig> = {
     defaultModelId: 'mimo-v2.5-asr',
     supportedLanguages: ['auto', 'zh', 'en'],
     supportedFormats: ['wav', 'mp3'],
+    // `transcribeXiaomiASR` posts to the chat/completions endpoint.
+    endpointPath: '/chat/completions',
     // Chunks are transcoded to 16 kHz mono s16le WAV (32 KiB/s) before the
     // provider sees them; 180 s encodes to ~7.5 MB of base64 — under MiMo's
     // 10 MB input_audio cap with headroom for the WAV header.
