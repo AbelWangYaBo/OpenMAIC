@@ -108,6 +108,23 @@ describe('Xiaomi MiMo ASR', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  it('rejects ADTS AAC despite the shared MPEG sync word', async () => {
+    // ADTS AAC starts FF F1 (MPEG-4) / FF F9 (MPEG-2): the sync word matches
+    // an MP3 frame, but the layer bits are always 00 where MP3 is nonzero.
+    const aacMpeg4 = Buffer.alloc(16);
+    aacMpeg4.set([0xff, 0xf1], 0);
+    const aacMpeg2 = Buffer.alloc(16);
+    aacMpeg2.set([0xff, 0xf9], 0);
+
+    await expect(
+      transcribeAudio({ providerId: 'xiaomi-asr', apiKey: 'k' }, aacMpeg4),
+    ).rejects.toThrow('supports wav/mp3 audio only');
+    await expect(
+      transcribeAudio({ providerId: 'xiaomi-asr', apiKey: 'k' }, aacMpeg2),
+    ).rejects.toThrow('supports wav/mp3 audio only');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it('surfaces the provider error text on an HTTP failure', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: false,

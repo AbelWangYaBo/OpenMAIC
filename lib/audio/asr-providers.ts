@@ -760,7 +760,12 @@ function resolveXiaomiASRAudioMime(bytes: Uint8Array): string | null {
   ) {
     return 'audio/wav';
   }
-  if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return 'audio/mp3';
+  // The layer bits must be nonzero: ADTS AAC shares the MPEG sync word
+  // (FF F1 / FF F9 ...) but always carries layer 00, so without this check
+  // an unsupported AAC upload is mislabeled as MP3 and sent to the provider.
+  if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0 && (bytes[1] & 0x06) !== 0) {
+    return 'audio/mp3';
+  }
   if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return 'audio/mp3';
   return null;
 }
