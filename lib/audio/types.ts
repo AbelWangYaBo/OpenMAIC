@@ -141,6 +141,12 @@ export interface TTSProviderConfig {
   defaultModelId: string;
   voices: TTSVoiceInfo[];
   supportedFormats: string[]; // ['mp3', 'wav', 'opus', etc.]
+  /**
+   * The request path under `defaultBaseUrl` the provider posts to, shown in
+   * the settings request-URL hint. Omitted when there is no single fixed
+   * path.
+   */
+  endpointPath?: string;
   speedRange?: {
     min: number;
     max: number;

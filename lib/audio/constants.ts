@@ -168,6 +168,7 @@ export const TTS_PROVIDERS: Record<BuiltInTTSProviderId, TTSProviderConfig> = {
     name: 'OpenAI TTS',
     requiresApiKey: true,
     defaultBaseUrl: 'https://api.openai.com/v1',
+    endpointPath: '/audio/speech',
     icon: '/logos/openai.svg',
     models: [
       { id: 'gpt-4o-mini-tts', name: 'GPT-4o Mini TTS' },
@@ -281,6 +282,7 @@ export const TTS_PROVIDERS: Record<BuiltInTTSProviderId, TTSProviderConfig> = {
     name: 'Azure TTS',
     requiresApiKey: true,
     defaultBaseUrl: 'https://{region}.tts.speech.microsoft.com',
+    endpointPath: '/cognitiveservices/v1',
     icon: '/logos/azure.svg',
     models: [],
     defaultModelId: '',
@@ -326,6 +328,7 @@ export const TTS_PROVIDERS: Record<BuiltInTTSProviderId, TTSProviderConfig> = {
     name: 'GLM TTS',
     requiresApiKey: true,
     defaultBaseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    endpointPath: '/audio/speech',
     icon: '/logos/glm.svg',
     models: [{ id: 'glm-tts', name: 'GLM TTS' }],
     defaultModelId: 'glm-tts',
@@ -389,6 +392,7 @@ export const TTS_PROVIDERS: Record<BuiltInTTSProviderId, TTSProviderConfig> = {
     name: 'Qwen TTS (阿里云百炼)',
     requiresApiKey: true,
     defaultBaseUrl: 'https://dashscope.aliyuncs.com/api/v1',
+    endpointPath: '/services/aigc/multimodal-generation/generation',
     icon: '/logos/bailian.svg',
     // Paid showcase presets: never offered to the agent even when this provider
     // is configured (explicit mechanism, not "no env so absent"). A clone
@@ -836,6 +840,7 @@ export const TTS_PROVIDERS: Record<BuiltInTTSProviderId, TTSProviderConfig> = {
     name: 'Xiaomi MiMo TTS',
     requiresApiKey: true,
     defaultBaseUrl: 'https://api.xiaomimimo.com/v1',
+    endpointPath: '/chat/completions',
     icon: '/logos/xiaomi.svg',
     models: [{ id: 'mimo-v2.5-tts', name: 'MiMo V2.5 TTS' }],
     defaultModelId: 'mimo-v2.5-tts',
@@ -880,6 +885,7 @@ export const TTS_PROVIDERS: Record<BuiltInTTSProviderId, TTSProviderConfig> = {
     name: '豆包 TTS 2.0（火山引擎）',
     requiresApiKey: true,
     defaultBaseUrl: 'https://openspeech.bytedance.com/api/v3/tts',
+    endpointPath: '/unidirectional',
     icon: '/logos/doubao.svg',
     models: [],
     defaultModelId: '',
@@ -980,6 +986,7 @@ export const TTS_PROVIDERS: Record<BuiltInTTSProviderId, TTSProviderConfig> = {
     name: 'ElevenLabs TTS',
     requiresApiKey: true,
     defaultBaseUrl: 'https://api.elevenlabs.io/v1',
+    endpointPath: '/text-to-speech',
     icon: '/logos/elevenlabs.svg',
     models: [
       { id: 'eleven_multilingual_v2', name: 'Multilingual v2' },
@@ -1048,6 +1055,7 @@ export const TTS_PROVIDERS: Record<BuiltInTTSProviderId, TTSProviderConfig> = {
     name: 'Google Gemini TTS',
     requiresApiKey: true,
     defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    endpointPath: '/interactions',
     icon: '/logos/gemini.svg',
     models: [
       { id: 'gemini-3.1-flash-tts-preview', name: 'Gemini 3.1 Flash TTS Preview' },
@@ -1257,6 +1265,7 @@ export const TTS_PROVIDERS: Record<BuiltInTTSProviderId, TTSProviderConfig> = {
     name: 'Lemonade TTS',
     requiresApiKey: false,
     defaultBaseUrl: 'http://localhost:13305/v1',
+    endpointPath: '/audio/speech',
     icon: '/logos/lemonade.svg',
     models: [{ id: 'kokoro-v1', name: 'Kokoro v1' }],
     defaultModelId: 'kokoro-v1',

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { generateTTS } from '@/lib/audio/tts-providers';
+import { TTS_PROVIDERS } from '@/lib/audio/constants';
 
 const mockFetch = vi.hoisted(() => vi.fn() as Mock);
 // The provider adapters issue requests through undici's fetch (with a pinned
@@ -125,5 +126,15 @@ describe('Xiaomi MiMo TTS', () => {
     await expect(
       generateTTS({ providerId: 'xiaomi-tts', apiKey: 'bad', voice: 'Mia' }, 'hello'),
     ).rejects.toThrow('invalid api key');
+  });
+});
+
+describe('Xiaomi MiMo TTS provider metadata', () => {
+  it('advertises the request path the adapter actually posts to', async () => {
+    // The settings request-URL hint renders defaultBaseUrl + endpointPath;
+    // it must match what generateXiaomiTTS really calls.
+    const { TTS_PROVIDERS: live } = await import('@/lib/audio/constants');
+    expect(live['xiaomi-tts'].endpointPath).toBe('/chat/completions');
+    expect(TTS_PROVIDERS['xiaomi-tts'].endpointPath).toBe(live['xiaomi-tts'].endpointPath);
   });
 });

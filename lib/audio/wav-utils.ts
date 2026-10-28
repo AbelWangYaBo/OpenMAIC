@@ -1,5 +1,8 @@
 'use client';
 
+import { ASR_PROVIDERS } from './constants';
+import type { BuiltInASRProviderId } from './types';
+
 function writeAscii(view: DataView, offset: number, value: string): void {
   for (let i = 0; i < value.length; i++) {
     view.setUint8(offset + i, value.charCodeAt(i));
@@ -77,9 +80,13 @@ export async function normalizeASRUploadAudio(
   providerId: string,
   audioBlob: Blob,
 ): Promise<{ blob: Blob; fileName: string }> {
-  // Providers whose APIs reject WebM/Opus recordings get a client-side WAV
-  // transcode; everyone else receives the recording as-is.
-  if (providerId !== 'lemonade-asr' && providerId !== 'funasr-asr' && providerId !== 'xiaomi-asr') {
+  // Browser recordings are WebM/Opus. A provider whose documented input
+  // formats do not include webm gets a client-side WAV transcode (a blob
+  // already in WAV passes through unchanged); everyone else receives the
+  // recording as-is. The decision comes from the provider registry, so this
+  // shared upload path holds no vendor ids.
+  const provider = ASR_PROVIDERS[providerId as BuiltInASRProviderId];
+  if (!provider || provider.supportedFormats.includes('webm')) {
     return { blob: audioBlob, fileName: 'recording.webm' };
   }
   return { blob: await audioBlobToWav(audioBlob), fileName: 'recording.wav' };
