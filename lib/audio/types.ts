@@ -227,6 +227,13 @@ export interface ASRProviderConfig {
   defaultModelId: string;
   supportedLanguages: string[];
   supportedFormats: string[];
+  /**
+   * The maximum ASR chunk duration (seconds) for server-side material
+   * extraction. Providers without a limit omit this and use the generic
+   * default. A provider whose input cap is a base64-encoded payload (e.g.
+   * Xiaomi MiMo's 10 MB input_audio limit) declares a lower bound here.
+   */
+  maxChunkSeconds?: number;
 }
 
 /**

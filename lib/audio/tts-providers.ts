@@ -1464,6 +1464,37 @@ async function generateDoubaoTTS(
 /**
  * Escape XML special characters for SSML
  */
+function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/**
+ * Map a numeric speed to a graded natural-language pacing instruction.
+ * MiMo TTS takes speed only as a style instruction, not a request parameter,
+ * so the slider range maps to graded wording: 1.05 and 2.0 must not produce
+ * the same request.
+ */
+function xiaomiPacingInstruction(speed: number): string | null {
+  if (speed > 1.0) {
+    const pct = Math.round((speed - 1) * 100);
+    if (pct >= 60) return '说得非常快，语速很快。';
+    if (pct >= 25) return '说得快一些，语速偏快。';
+    return '语速稍微快一点。';
+  }
+  if (speed < 1.0) {
+    const pct = Math.round((1 - speed) * 100);
+    if (pct >= 40) return '说得非常慢，语速很慢。';
+    if (pct >= 15) return '说得慢一些，语速偏慢。';
+    return '语速稍微慢一点。';
+  }
+  return null;
+}
+
 /**
  * Xiaomi MiMo TTS implementation.
  *
@@ -1472,8 +1503,8 @@ async function generateDoubaoTTS(
  * message (a hard provider rule), optional style instructions go in a `user`
  * message, and the audio payload comes back base64-encoded at
  * `choices[0].message.audio.data`. Numeric speed is not a request parameter,
- * so a non-default speed is translated into a natural-language style
- * instruction instead.
+ * so a non-default speed is translated into a graded pacing instruction
+ * (`xiaomiPacingInstruction`).
  */
 async function generateXiaomiTTS(
   config: TTSModelConfig,
@@ -1486,11 +1517,9 @@ async function generateXiaomiTTS(
   );
 
   const messages: Array<{ role: string; content: string }> = [];
-  const speed = config.speed ?? 1.0;
-  if (speed > 1.0) {
-    messages.push({ role: 'user', content: '说得快一些，语速偏快。' });
-  } else if (speed < 1.0) {
-    messages.push({ role: 'user', content: '说得慢一些，语速偏慢。' });
+  const pacing = xiaomiPacingInstruction(config.speed ?? 1.0);
+  if (pacing) {
+    messages.push({ role: 'user', content: pacing });
   }
   messages.push({ role: 'assistant', content: text });
 
@@ -1541,13 +1570,4 @@ async function generateXiaomiTTS(
     audio: new Uint8Array(audio),
     format: 'wav',
   };
-}
-
-function escapeXml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
 }

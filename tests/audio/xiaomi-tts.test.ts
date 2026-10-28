@@ -85,7 +85,21 @@ describe('Xiaomi MiMo TTS', () => {
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.messages.map((m: { role: string }) => m.role)).toEqual(['user', 'assistant']);
-    expect(body.messages[0].content).toBe('说得慢一些，语速偏慢。');
+    expect(body.messages[0].content).toBe('说得非常慢，语速很慢。');
+  });
+
+  it('grades the pacing instruction so 1.05 and 2.0 differ', async () => {
+    mockFetch.mockResolvedValueOnce(chatResponse(wavB64));
+    mockFetch.mockResolvedValueOnce(chatResponse(wavB64));
+
+    await generateTTS({ providerId: 'xiaomi-tts', apiKey: 'k', voice: 'Mia', speed: 1.05 }, 'a');
+    await generateTTS({ providerId: 'xiaomi-tts', apiKey: 'k', voice: 'Mia', speed: 2.0 }, 'b');
+
+    const slight = JSON.parse(mockFetch.mock.calls[0][1].body).messages[0].content;
+    const fastest = JSON.parse(mockFetch.mock.calls[1][1].body).messages[0].content;
+    expect(slight).toBe('语速稍微快一点。');
+    expect(fastest).toBe('说得非常快，语速很快。');
+    expect(slight).not.toBe(fastest);
   });
 
   it('throws a descriptive error when the response carries no audio', async () => {

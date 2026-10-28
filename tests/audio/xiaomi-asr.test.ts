@@ -91,6 +91,23 @@ describe('Xiaomi MiMo ASR', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  it('rejects flac and ogg samples locally as unsupported formats', async () => {
+    // "fLaC" magic — a well-formed file the provider does not document.
+    const flac = Buffer.alloc(16);
+    flac.set([0x66, 0x4c, 0x61, 0x43], 0);
+    // "OggS" magic.
+    const ogg = Buffer.alloc(16);
+    ogg.set([0x4f, 0x67, 0x67, 0x53], 0);
+
+    await expect(transcribeAudio({ providerId: 'xiaomi-asr', apiKey: 'k' }, flac)).rejects.toThrow(
+      'supports wav/mp3 audio only',
+    );
+    await expect(transcribeAudio({ providerId: 'xiaomi-asr', apiKey: 'k' }, ogg)).rejects.toThrow(
+      'supports wav/mp3 audio only',
+    );
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it('surfaces the provider error text on an HTTP failure', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: false,

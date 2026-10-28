@@ -1417,7 +1417,7 @@
     "providerElevenLabsTTS": "ElevenLabs TTS",
     "providerMiniMaxTTS": "MiniMax TTS",
     "providerXiaomiTTS": "Xiaomi MiMo TTS",
-    "providerXiaomiASR": "xiaomi MiMo ASR",
+    "providerXiaomiASR": "Xiaomi MiMo ASR",
     "providerGoogleTTS": "Google Gemini TTS",
     "providerLemonadeTTS": "Lemonade TTS (محلي)",
     "providerBrowserNativeTTS": "تحويل النص إلى كلام المدمج في المتصفح",

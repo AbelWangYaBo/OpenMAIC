@@ -688,8 +688,9 @@ async function transcribeXiaomiASR(
   // Browser recordings expand into uncompressed WAV, so long dictations hit
   // this here with a clear message instead of an opaque provider error.
   if (base64.length > MAX_XIAOMI_ASR_ENCODED_BYTES) {
-    // 48 kHz mono WAV grows ~5.6 KB/s, so a minute of speech is already near
-    // the documented 10 MB input_audio ceiling.
+    // 48 kHz mono WAV is ~96 KB/s raw (~125 KB/s once base64-encoded), so
+    // roughly 80 seconds of speech already reaches the documented 10 MB
+    // input_audio ceiling.
     throw new Error(
       `Xiaomi MiMo ASR audio exceeds the documented 10 MB input_audio limit ` +
         `(${Math.round(base64.length / 1024 / 1024)} MB encoded). Shorten the audio.`,
@@ -740,8 +741,9 @@ async function transcribeXiaomiASR(
 }
 
 /**
- * The mime types MiMo ASR accepts, detected from the bytes rather than trusted
- * from the recording's declared type.
+ * The mime types MiMo ASR accepts — the documented wav and mp3 only — detected
+ * from the bytes rather than trusted from the recording's declared type.
+ * Anything else (flac, mp4, ogg, ...) is rejected locally here.
  */
 function resolveXiaomiASRAudioMime(bytes: Uint8Array): string | null {
   // RIFF....WAVE
@@ -760,20 +762,6 @@ function resolveXiaomiASRAudioMime(bytes: Uint8Array): string | null {
   }
   if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return 'audio/mp3';
   if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return 'audio/mp3';
-  if (bytes[0] === 0x66 && bytes[1] === 0x4c && bytes[2] === 0x61 && bytes[3] === 0x43)
-    return 'audio/flac';
-  if (
-    bytes.length > 11 &&
-    bytes[4] === 0x66 &&
-    bytes[5] === 0x74 &&
-    bytes[6] === 0x79 &&
-    bytes[7] === 0x70
-  ) {
-    return 'audio/mp4';
-  }
-  if (bytes[0] === 0x4f && bytes[1] === 0x67 && bytes[2] === 0x67 && bytes[3] === 0x53) {
-    return 'audio/ogg';
-  }
   return null;
 }
 

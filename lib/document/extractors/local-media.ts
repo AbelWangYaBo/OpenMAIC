@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { basename, delimiter, extname, join, resolve as resolvePath } from 'node:path';
 
 import { transcribeAudio, type ASRTranscriptionResult } from '@/lib/audio/asr-providers';
-import type { ASRModelConfig } from '@/lib/audio/types';
+import { ASR_PROVIDERS } from '@/lib/audio/constants';
+import type { ASRModelConfig, BuiltInASRProviderId } from '@/lib/audio/types';
 
 import { MEDIA_MAX_DURATION_SEC } from '@/lib/types/media-limits';
 
@@ -29,18 +30,14 @@ import { asrFetchSignal } from '@/lib/audio/asr-fetch-signal';
 export const MEDIA_ASR_CHUNK_SEC = 600;
 
 /**
- * Per-provider ASR chunk seconds. Chunks are transcoded to 16 kHz mono
- * s16le WAV (32 KiB/s) before the provider sees them, so a provider whose
- * input cap is a base64-encoded payload bounds its chunk duration here:
- * Xiaomi MiMo refuses input_audio payloads over 10 MB of base64, and 180 s
- * encodes to ~7.5 MB — under the cap with headroom for the WAV header.
+ * The ASR chunk duration for a provider: its declared `maxChunkSeconds`
+ * (see `ASRProviderConfig`) when the provider bounds its input payload,
+ * otherwise the generic default. The provider registry is neutral — no
+ * vendor ids are named here.
  */
-const MEDIA_ASR_CHUNK_SEC_BY_PROVIDER: Partial<Record<string, number>> = {
-  'xiaomi-asr': 180,
-};
-
 export function mediaASRChunkSec(providerId?: string): number {
-  return (providerId && MEDIA_ASR_CHUNK_SEC_BY_PROVIDER[providerId]) || MEDIA_ASR_CHUNK_SEC;
+  const config = providerId ? ASR_PROVIDERS[providerId as BuiltInASRProviderId] : undefined;
+  return config?.maxChunkSeconds || MEDIA_ASR_CHUNK_SEC;
 }
 const MEDIA_COMMAND_TIMEOUT_MS = 20 * 60 * 1000;
 const FFPROBE_TIMEOUT_MS = 30_000;
