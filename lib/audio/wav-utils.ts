@@ -87,7 +87,9 @@ export async function normalizeASRUploadAudio(
   // recording as-is. The decision comes from the provider registry, so this
   // shared upload path holds no vendor ids.
   const provider = ASR_PROVIDERS[providerId as BuiltInASRProviderId];
-  const registryTranscode = !provider || !provider.supportedFormats.includes('webm');
+  // Unknown ids (custom providers) pass through; a known provider whose
+  // formats lack webm transcodes.
+  const registryTranscode = provider !== undefined && !provider.supportedFormats.includes('webm');
   // Qwen3 behind a compatible transcription endpoint decodes PCM/WAV, but
   // cannot decode the browser's WebM/Opus recording container. Model IDs may
   // include a namespace and mixed case, e.g. Qwen/Qwen3-ASR-1.7B.
