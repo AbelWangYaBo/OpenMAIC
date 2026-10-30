@@ -1058,11 +1058,13 @@ export const TTS_PROVIDERS: Record<BuiltInTTSProviderId, TTSProviderConfig> = {
     endpointPath: '/interactions',
     icon: '/logos/gemini.svg',
     models: [
+      { id: 'gemini-3.8-flash-lite-tts', name: 'Gemini 3.8 Flash-Lite TTS' },
+      { id: 'gemini-3.8-flash-tts', name: 'Gemini 3.8 Flash TTS' },
       { id: 'gemini-3.1-flash-tts-preview', name: 'Gemini 3.1 Flash TTS Preview' },
       { id: 'gemini-2.5-flash-preview-tts', name: 'Gemini 2.5 Flash Preview TTS' },
       { id: 'gemini-2.5-pro-preview-tts', name: 'Gemini 2.5 Pro Preview TTS' },
     ],
-    defaultModelId: 'gemini-3.1-flash-tts-preview',
+    defaultModelId: 'gemini-3.8-flash-lite-tts',
     // Prebuilt Gemini TTS voices (https://ai.google.dev/gemini-api/docs/speech-generation)
     voices: [
       { id: 'Zephyr', name: 'Zephyr', language: 'en-US', gender: 'neutral', description: 'Bright' },
@@ -1649,7 +1651,7 @@ export const DEFAULT_TTS_MODELS: Record<BuiltInTTSProviderId, string> = {
   'elevenlabs-tts': 'eleven_multilingual_v2',
   'minimax-tts': 'speech-2.8-hd',
   'xiaomi-tts': 'mimo-v2.5-tts',
-  'google-tts': 'gemini-3.1-flash-tts-preview',
+  'google-tts': 'gemini-3.8-flash-lite-tts',
   'lemonade-tts': 'kokoro-v1',
   'browser-native-tts': '',
 };
